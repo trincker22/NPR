@@ -1,0 +1,104 @@
+---
+title: "FinalProject"
+output: html_document
+date: "2025-05-01"
+---
+
+```{r }
+
+rm(list = ls())
+
+library(tidyverse)
+library(readr)
+library(jsonlite)
+library(purrr)
+library(lubridate)
+library(quanteda)  
+library(here)
+
+
+# pull files 
+csvfiles <- list.files(path = here("archive"), pattern = "\\.csv$", full.names = TRUE)
+jsonfiles <- list.files(path = here("archive"), pattern = "\\.json$", full.names = TRUE)
+
+names(csvfiles) <- make.names(tools::file_path_sans_ext(basename(csvfiles)))
+names(jsonfiles) <- make.names(tools::file_path_sans_ext(basename(jsonfiles)))
+
+# load files w anon fuction 
+walk(names(csvfiles), ~ assign(.x, read_csv(csvfiles[[.x]]), envir = .GlobalEnv))
+walk(names(jsonfiles), ~ assign(.x, fromJSON(jsonfiles[[.x]], flatten = TRUE), envir = .GlobalEnv))
+
+
+```
+
+# Cleaning
+
+```{r}
+
+# collapse to 1 ob per ep
+ep_utterances <- utterances.2sp %>%
+  group_by(episode) %>%
+  summarise(full_text = paste(utterance, collapse = " "), .groups = "drop")
+
+# collapse but w only guest speech
+ep_utterancesG <- utterances.2sp %>%
+  filter(!is_host) %>%
+  group_by(episode) %>%
+  summarise(full_text = paste(utterance, collapse = " "), .groups = "drop")
+
+# host id extract & pull metadata from list 
+host_id2sp <- utterances.2sp %>%
+  filter(host_id != -1) %>%
+  distinct(episode, host_id)
+
+host_episode_df <- map_dfr(host.map, ~ tibble(
+  episode = .x$episodes,
+  host_name = .x$name
+))
+
+# function for joins w out redundancy 
+safe_join <- function(df, join_df, by_col, new_col) {
+  if (!(new_col %in% colnames(df))) {
+    df <- df %>% left_join(join_df, by = by_col)
+  } else {
+    stop(glue::glue("'{new_col}' already exists"))
+  }
+  return(df)
+}
+
+
+# preprocessing loop for df w/wout the host speech (but w host metadata)
+for (df_name in c("ep_utterances", "ep_utterancesG")) {
+  df <- get(df_name)
+
+  df <- safe_join(df, host_id2sp, "episode", "host_id")
+  df <- safe_join(df, host_episode_df, "episode", "host_name")
+  df <- safe_join(df, episodes, join_by(episode == id), "title")
+
+  # program as factor for vis 
+  if ("program" %in% colnames(df)) {
+    df$program <- as.factor(df$program)
+  }
+
+  # date processing w lubridate
+  if ("episode_date" %in% colnames(df)) {
+    df <- df %>%
+      mutate(
+        episode_date = as.Date(episode_date),
+        year = year(episode_date),
+        month = month(episode_date, label = TRUE),
+        weekday = wday(episode_date, label = TRUE)
+      )
+  }
+
+  assign(df_name, df, envir = .GlobalEnv)
+}
+
+
+```
+
+# Preprocess Text
+
+```{r}
+
+```
