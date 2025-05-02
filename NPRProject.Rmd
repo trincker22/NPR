@@ -15,6 +15,9 @@ library(purrr)
 library(lubridate)
 library(quanteda)  
 library(here)
+library(tokenizers)
+library(topicmodels)
+library(syuzhet)
 
 
 # pull files 
@@ -100,5 +103,190 @@ for (df_name in c("ep_utterances", "ep_utterancesG")) {
 # Preprocess Text
 
 ```{r}
+
+
+# corpus and tokenize
+ep_uttercorp <- corpus(ep_utterances, text_field = "full_text")
+
+toks <- tokens(ep_uttercorp, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_wordstem() %>%
+  tokens_select(pattern = stopwords("en"), selection = "remove")
+
+# create and trim dfm (high freq bar)
+dfm <- dfm(toks)
+dfm_trimmed <- dfm_trim(dfm, min_termfreq = 100)
+
+# sampling so i can run/not too large
+set.seed(123)
+sample_size <- 10000
+sampled_rows <- sample(seq_len(ndoc(dfm_trimmed)), sample_size)
+dfm_sampled <- dfm_trimmed[sampled_rows, ]
+
+# convert to topicmodels format and run LDA
+dtm <- convert(dfm_sampled, to = "topicmodels")
+# lda_model <- LDA(dtm, k = 20, method = "Gibbs", control = list(seed = 1234))
+# takes foreverrr to run 
+
+terms(lda_model, 20)
+topic_weights <- posterior(lda_model)$topics
+
+
+```
+
+```{r}
+
+
+# define immigration-related stems & filter 
+immigration_stems <- c(
+  "immigr", "migrat", "migrant", "refuge", "asylum",
+  "deport", "citizenship", "visa", "natur", "undocu"
+)
+
+doc_index <- rowSums(dfm_select(dfm, pattern = immigration_stems)) > 0
+dfm_filtered <- dfm[doc_index, ]
+
+dfm_immig <- dfm_trim(dfm_filtered, min_termfreq = 20)
+
+# convert to topicmodels format and run lda
+dtmIM <- convert(dfm_immig, to = "topicmodels")
+# lda_IMmodel <- LDA(dtmIM, k = 4, method = "Gibbs", control = list(seed = 1234))
+terms(lda_IMmodel, 20)
+
+# get topic weights per doc
+topic_weights <- posterior(lda_IMmodel)$topics
+dominant_topic <- apply(topic_weights, 1, which.max)
+
+# get matching metadata to convert back to df 
+ep_immigration <- ep_utterances[doc_index, ]
+topic_df <- data.frame(topic_weights)
+colnames(topic_df) <- as.character(seq_len(ncol(topic_df)))
+
+# assign 4-month period for aggregation
+topic_df$period <- floor_date(ep_immigration$episode_date, "4 months")
+
+# reshape and average topic weights
+topic_time <- topic_df %>%
+  pivot_longer(cols = c("1", "2", "3", "4"), names_to = "topic", values_to = "weight") %>%
+  group_by(period, topic) %>%
+  summarise(avg_weight = mean(weight), .groups = "drop")
+
+# define topic labels
+topic_labels <- c(
+  "1" = "Political framing",
+  "2" = "Personal stories",
+  "3" = "Security & foreign affairs",
+  "4" = "Public debate"
+)
+
+# map topic numbers to labels
+topic_time <- topic_time %>%
+  mutate(topic_label = factor(topic_labels[topic], levels = topic_labels))
+
+# plot
+ggplot(topic_time, aes(x = period, y = avg_weight, color = topic_label)) +
+  geom_line(size = 0.7) +
+  labs(title = "Immigration topic trends over time",
+       x = "Month", y = "Average topic proportion",
+       color = "Topic") +
+  theme_minimal()
+
+```
+# More Visualization 
+
+```{r}
+
+ep_immigration_topics <- ep_immigration %>%
+  mutate(dominant_topic = dominant_topic) %>%
+  bind_cols(as.data.frame(topic_weights))
+
+
+ep_immigration_topics <- ep_immigration_topics %>%
+  mutate(topic_label = topic_labels[as.character(dominant_topic)])
+
+# immigration share of all episodes over time (4-month periods)
+ep_immigration_topics %>%
+  mutate(period = floor_date(episode_date, "4 months")) %>%
+  count(period, name = "immig_episodes") %>%
+  left_join(episodes %>%
+              mutate(period = floor_date(episode_date, "4 months")) %>%
+              count(period, name = "total_episodes"),
+            by = "period") %>%
+  mutate(share = immig_episodes / total_episodes) %>%
+  ggplot(aes(x = period, y = share)) +
+  geom_line(size = 0.7) +
+  labs(title = "Immigration Coverage as % of All Episodes Over Time",
+       x = "Date", y = "Percent of Episodes") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_minimal()
+
+
+# immigration coverage as % of all episodes per program
+ep_immigration_topics %>%
+  count(program, name = "immig_episodes") %>%
+  left_join(episodes %>% count(program, name = "total_episodes"), by = "program") %>%
+  mutate(immig_share = immig_episodes / total_episodes) %>%
+  filter(total_episodes >= 10) %>%  # optional: drop very small shows
+  slice_max(immig_share, n = 10) %>%
+  ggplot(aes(x = reorder(program, immig_share), y = immig_share)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "Immigration coverage as % of all episodes",
+       x = "Program", y = "Percent immigration-related") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  coord_flip() +
+  theme_minimal()
+
+
+# sentiment by topic 
+ep_immigration_topics$sentiment <- get_sentiment(ep_immigration_topics$full_text, method = "afinn")
+
+ep_immigration_topics %>%
+  group_by(topic_label) %>%
+  summarise(avg_sentiment = mean(sentiment, na.rm = TRUE)) %>%
+  ggplot(aes(x = reorder(topic_label, avg_sentiment), y = avg_sentiment, fill = topic_label)) +
+  geom_col(show.legend = FALSE) +
+  labs(title = "Average sentiment by topic",
+       x = "Topic", y = "Avg sentiment score") +
+  coord_flip() +
+  theme_minimal()
+
+
+
+```
+
+
+```{r}
+
+
+top_hosts <- ep_immigration_topics %>%
+  count(host_name, sort = TRUE) %>%
+  slice_head(n = 5) %>%
+  pull(host_name)
+
+top_host_data <- ep_immigration_topics %>%
+  filter(host_name %in% top_hosts)
+
+
+top_host_data %>%
+  group_by(host_name, topic_label) %>%
+  summarise(avg_sentiment = mean(sentiment, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = topic_label, y = avg_sentiment, fill = host_name)) +
+  geom_col(position = "dodge") +
+  labs(title = "Average Sentiment by Topic and Host",
+       x = "Topic", y = "Average Sentiment",
+       fill = "Host") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+top_host_data %>%
+  count(host_name, topic_label) %>%
+  group_by(host_name) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = host_name, y = prop, fill = topic_label)) +
+  geom_col(position = "fill") +
+  labs(title = "Topic Distribution by Top 5 Hosts",
+       x = "Host", y = "Proportion of Episodes",
+       fill = "Topic") +
+  theme_minimal()
+
 
 ```
