@@ -4,7 +4,7 @@ output: html_document
 date: "2025-05-01"
 ---
 
-```{r }
+```{r, results = "hide" }
 
 rm(list = ls())
 
@@ -36,7 +36,7 @@ walk(names(jsonfiles), ~ assign(.x, fromJSON(jsonfiles[[.x]], flatten = TRUE), e
 
 # Cleaning
 
-```{r}
+```{r, results = "hide"}
 
 # collapse to 1 ob per ep
 ep_utterances <- utterances.2sp %>%
@@ -133,6 +133,8 @@ topic_weights <- posterior(lda_model)$topics
 
 ```
 
+# Process & LDA Model For 2 Person Interviews Discussing Immigration
+
 ```{r}
 
 
@@ -182,16 +184,26 @@ topic_labels <- c(
 topic_time <- topic_time %>%
   mutate(topic_label = factor(topic_labels[topic], levels = topic_labels))
 
+
+```
+
+# Visualization
+
+### Immigration Topic Trends Over Time
+
+```{r}
+
 # plot
 ggplot(topic_time, aes(x = period, y = avg_weight, color = topic_label)) +
   geom_line(size = 0.7) +
-  labs(title = "Immigration topic trends over time",
-       x = "Month", y = "Average topic proportion",
+  labs(title = "Immigration Topic Trends Over Time",
+       x = "Month", y = "Average Topic Proportion",
        color = "Topic") +
   theme_minimal()
 
 ```
-# More Visualization 
+
+### Immigration as Share of Episodes
 
 ```{r}
 
@@ -219,7 +231,11 @@ ep_immigration_topics %>%
   scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
   theme_minimal()
 
+```
 
+### Immigration Coverage By Program
+
+```{r}
 # immigration coverage as % of all episodes per program
 ep_immigration_topics %>%
   count(program, name = "immig_episodes") %>%
@@ -235,7 +251,11 @@ ep_immigration_topics %>%
   coord_flip() +
   theme_minimal()
 
+```
 
+### Sentiment By Topic
+
+```{r}
 # sentiment by topic 
 ep_immigration_topics$sentiment <- get_sentiment(ep_immigration_topics$full_text, method = "afinn")
 
@@ -250,12 +270,11 @@ ep_immigration_topics %>%
   theme_minimal()
 
 
-
 ```
 
+### Host Sentiment By Topic
 
 ```{r}
-
 
 top_hosts <- ep_immigration_topics %>%
   count(host_name, sort = TRUE) %>%
@@ -276,6 +295,12 @@ top_host_data %>%
        fill = "Host") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+```
+
+### Host Topic Distribution
+
+```{r}
 
 top_host_data %>%
   count(host_name, topic_label) %>%
