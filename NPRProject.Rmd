@@ -1,10 +1,11 @@
 ---
-title: "FinalProject"
+title: "NPR Project"
 output: html_document
 date: "2025-05-01"
 ---
 
-```{r, results = "hide" }
+```{r setup, include = FALSE}
+
 
 rm(list = ls())
 
@@ -18,6 +19,9 @@ library(here)
 library(tokenizers)
 library(topicmodels)
 library(syuzhet)
+library(caret)
+library(irr)
+
 
 
 # pull files 
@@ -114,7 +118,7 @@ toks <- tokens(ep_uttercorp, remove_punct = TRUE, remove_numbers = TRUE) %>%
 
 # create and trim dfm (high freq bar)
 dfm <- dfm(toks)
-dfm_trimmed <- dfm_trim(dfm, min_termfreq = 100)
+dfm_trimmed <- dfm_trim(dfm, min_termfreq = 50)
 
 # sampling so i can run/not too large
 set.seed(123)
@@ -127,8 +131,8 @@ dtm <- convert(dfm_sampled, to = "topicmodels")
 # lda_model <- LDA(dtm, k = 20, method = "Gibbs", control = list(seed = 1234))
 # takes foreverrr to run 
 
-terms(lda_model, 20)
-topic_weights <- posterior(lda_model)$topics
+# terms(lda_model, 20)
+# topic_weights <- posterior(lda_model)$topics
 
 
 ```
@@ -141,17 +145,30 @@ topic_weights <- posterior(lda_model)$topics
 # define immigration-related stems & filter 
 immigration_stems <- c(
   "immigr", "migrat", "migrant", "refuge", "asylum",
-  "deport", "citizenship", "visa", "natur", "undocu"
+  "deport", "citizenship", "visa", "undocu"
 )
 
-doc_index <- rowSums(dfm_select(dfm, pattern = immigration_stems)) > 0
+immigration_stems_LDA <- c(
+  "immigr", "migrat", "migrant", "refuge", "asylum",
+  "deport", "citizenship", "visa", "undocu", "natur"
+)
+
+doc_index <- rowSums(dfm_select(dfm, pattern = immigration_stems_LDA)) > 0
+doc_index_new <- rowSums(dfm_select(dfm, pattern = immigration_stems)) > 0
 dfm_filtered <- dfm[doc_index, ]
 
 dfm_immig <- dfm_trim(dfm_filtered, min_termfreq = 20)
 
 # convert to topicmodels format and run lda
 dtmIM <- convert(dfm_immig, to = "topicmodels")
-# lda_IMmodel <- LDA(dtmIM, k = 4, method = "Gibbs", control = list(seed = 1234))
+
+if (!file.exists("lda_IMmodel.rds")) {
+  lda_IMmodel <- LDA(dtmIM, k = 4, method = "Gibbs", control = list(seed = 1234))
+  saveRDS(lda_IMmodel, "lda_IMmodel.rds")
+} else {
+  lda_IMmodel <- readRDS("lda_IMmodel.rds")
+}
+
 terms(lda_IMmodel, 20)
 
 # get topic weights per doc
@@ -163,7 +180,11 @@ ep_immigration <- ep_utterances[doc_index, ]
 topic_df <- data.frame(topic_weights)
 colnames(topic_df) <- as.character(seq_len(ncol(topic_df)))
 
+
 # assign 4-month period for aggregation
+
+# ok, so i changed the df size to 2k obs, i dont remember what did but i made the filtering more 
+#stringent. 
 topic_df$period <- floor_date(ep_immigration$episode_date, "4 months")
 
 # reshape and average topic weights
@@ -195,7 +216,7 @@ topic_time <- topic_time %>%
 
 # plot
 ggplot(topic_time, aes(x = period, y = avg_weight, color = topic_label)) +
-  geom_line(size = 0.7) +
+  geom_line(linewidth = 0.7) +
   labs(title = "Immigration Topic Trends Over Time",
        x = "Month", y = "Average Topic Proportion",
        color = "Topic") +
@@ -253,7 +274,7 @@ ep_immigration_topics %>%
 
 ```
 
-### Sentiment By Topic
+### Sentiment By Immigration Framing Topic
 
 ```{r}
 # sentiment by topic 
@@ -272,7 +293,7 @@ ep_immigration_topics %>%
 
 ```
 
-### Host Sentiment By Topic
+### Host Sentiment By Framing Topic
 
 ```{r}
 
@@ -298,7 +319,7 @@ top_host_data %>%
 
 ```
 
-### Host Topic Distribution
+### Host Framing Topic Distribution
 
 ```{r}
 
@@ -315,3 +336,142 @@ top_host_data %>%
 
 
 ```
+
+#Pull ~100 Word Snippet 
+
+
+```{r}
+
+
+ep_immigration <- ep_utterances[doc_index_new, ]
+
+# handcoding can easily be joined using episode number, a unique observation identifier. 
+
+immigration_stems <- c(
+  "immigr", "migrat", "migrant", "refuge", "asylum",
+  "deport", "citizenship", "visa", "undocu"
+)
+
+vec <- ep_immigration %>% 
+  select(full_text) %>% 
+  pull()
+
+pattern <- paste0(immigration_stems, collapse = "|")
+
+# Function: One snippet per episode
+get_one_snippet <- function(text, pattern, window = 50) {
+  words <- unlist(tokenize_words(text, lowercase = TRUE))
+  matches <- which(str_detect(words, pattern))
+  
+  if (length(matches) == 0) return(NA_character_)  # no keyword
+  
+  # Build ±window for each match
+  windows <- lapply(matches, function(i) c(max(1, i - window), min(length(words), i + window)))
+  
+  # Merge overlapping windows
+  windows <- windows[order(sapply(windows, `[[`, 1))]  # sort by start index
+  merged <- list()
+  current <- windows[[1]]
+  
+  for (w in windows[-1]) {
+    if (w[1] <= current[2]) {
+      current[2] <- max(current[2], w[2])  # extend current window
+    } else {
+      merged <- append(merged, list(current))
+      current <- w
+    }
+  }
+  merged <- append(merged, list(current))
+  
+  # Choose one merged snippet: random if multiple
+  chosen <- merged[[sample(length(merged), 1)]]
+  snippet <- paste(words[chosen[1]:chosen[2]], collapse = " ")
+  return(snippet)
+}
+
+
+snippets <- sapply(vec, get_one_snippet, pattern = pattern)
+
+snippets_df <- data.frame(
+  index = seq_along(snippets),
+  snippet = snippets,
+  stringsAsFactors = FALSE
+)
+
+if(!"snippet" %in% colnames(immigration)) {
+immigration <- cbind(snippets_df, ep_immigration)
+} else {
+  paste("stop")
+}
+
+immigration %>% 
+  select(-index)
+
+```
+
+# Inter-coder Reliability 
+
+
+
+```{r}
+
+hc_complete <- read.csv("HandcodeComplete.csv")
+
+all_categories <- c("Security.Threat", "Economic", "Humanitarian.Moral", "Other")
+
+
+cols_1 <- paste0(all_categories, "1")
+cols_2 <- paste0(all_categories, "2")
+
+# ensure one-hot columns are numeric
+hc_complete[cols_1] <- lapply(hc_complete[cols_1], as.numeric)
+hc_complete[cols_2] <- lapply(hc_complete[cols_2], as.numeric)
+
+#function to extract label from one-hot columns
+get_label <- function(row, suffix) {
+  selected <- which(row[paste0(all_categories, suffix)] == 1)
+  if (length(selected) == 1) {
+    return(all_categories[selected])
+  } else {
+    return(NA)
+  }
+}
+
+hc_complete$coder1_label <- apply(hc_complete, 1, get_label, suffix = "1")
+hc_complete$coder2_label <- apply(hc_complete, 1, get_label, suffix = "2")
+
+hc_complete$coder1_label <- factor(hc_complete$coder1_label, levels = all_categories)
+hc_complete$coder2_label <- factor(hc_complete$coder2_label, levels = all_categories)
+
+# confusion matrix
+confusion_matrix <- table(hc_complete$coder1_label, hc_complete$coder2_label)
+print(confusion_matrix)
+
+
+#################################################
+# making matrix for kripp alpha 
+
+valid_categories <- c("Security.Threat", "Economic", "Humanitarian.Moral", "Other")
+category_lookup <- setNames(1:4, valid_categories)
+
+hc_clean <- hc_complete %>%
+  filter(coder1_label %in% valid_categories,
+         coder2_label %in% valid_categories)
+
+# convert labels to numeric using the lookup
+rater_matrix <- data.frame(
+  coder1 = category_lookup[hc_clean$coder1_label],
+  coder2 = category_lookup[hc_clean$coder2_label]
+)
+
+# transpose and run kripp alpha
+rater_matrix_t <- t(rater_matrix)
+kripp.alpha(rater_matrix_t, method = "nominal")
+
+
+```
+
+
+
+
+```{r}
