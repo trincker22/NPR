@@ -15,12 +15,15 @@ library(jsonlite)
 library(purrr)
 library(lubridate)
 library(quanteda)  
+library(quanteda.textmodels)
 library(here)
 library(tokenizers)
 library(topicmodels)
 library(syuzhet)
 library(caret)
 library(irr)
+library(SnowballC)
+
 
 
 
@@ -42,52 +45,48 @@ walk(names(jsonfiles), ~ assign(.x, fromJSON(jsonfiles[[.x]], flatten = TRUE), e
 
 ```{r, results = "hide"}
 
-# collapse to 1 ob per ep
+
+# Collapse to 1 observation per episode (full transcript and guest-only)
 ep_utterances <- utterances.2sp %>%
   group_by(episode) %>%
   summarise(full_text = paste(utterance, collapse = " "), .groups = "drop")
 
-# collapse but w only guest speech
 ep_utterancesG <- utterances.2sp %>%
   filter(!is_host) %>%
   group_by(episode) %>%
   summarise(full_text = paste(utterance, collapse = " "), .groups = "drop")
 
-# host id extract & pull metadata from list 
-host_id2sp <- utterances.2sp %>%
-  filter(host_id != -1) %>%
-  distinct(episode, host_id)
-
+# Collapse host names to comma-separated string per episode
 host_episode_df <- map_dfr(host.map, ~ tibble(
   episode = .x$episodes,
   host_name = .x$name
-))
+)) %>%
+  group_by(episode) %>%
+  summarise(host_name = paste(unique(host_name), collapse = ", "), .groups = "drop")
 
-# function for joins w out redundancy 
+# Define safe left_join function to avoid overwriting existing columns
 safe_join <- function(df, join_df, by_col, new_col) {
   if (!(new_col %in% colnames(df))) {
     df <- df %>% left_join(join_df, by = by_col)
   } else {
-    stop(glue::glue("'{new_col}' already exists"))
+    stop(glue("'{new_col}' already exists"))
   }
   return(df)
 }
 
-
-# preprocessing loop for df w/wout the host speech (but w host metadata)
+# Loop through both datasets to attach host metadata and enrich features
 for (df_name in c("ep_utterances", "ep_utterancesG")) {
   df <- get(df_name)
 
-  df <- safe_join(df, host_id2sp, "episode", "host_id")
   df <- safe_join(df, host_episode_df, "episode", "host_name")
   df <- safe_join(df, episodes, join_by(episode == id), "title")
 
-  # program as factor for vis 
+  # Convert program to factor (if present)
   if ("program" %in% colnames(df)) {
     df$program <- as.factor(df$program)
   }
 
-  # date processing w lubridate
+  # Parse episode_date and create derived date columns (if present)
   if ("episode_date" %in% colnames(df)) {
     df <- df %>%
       mutate(
@@ -108,271 +107,62 @@ for (df_name in c("ep_utterances", "ep_utterancesG")) {
 
 ```{r}
 
-
-# corpus and tokenize
+# create dfm with episode IDs stored as docvars
 ep_uttercorp <- corpus(ep_utterances, text_field = "full_text")
+docvars(ep_uttercorp, "episode") <- ep_utterances$episode
+
 
 toks <- tokens(ep_uttercorp, remove_punct = TRUE, remove_numbers = TRUE) %>%
   tokens_wordstem() %>%
   tokens_select(pattern = stopwords("en"), selection = "remove")
 
-# create and trim dfm (high freq bar)
+
 dfm <- dfm(toks)
-dfm_trimmed <- dfm_trim(dfm, min_termfreq = 50)
-
-# sampling so i can run/not too large
-set.seed(123)
-sample_size <- 10000
-sampled_rows <- sample(seq_len(ndoc(dfm_trimmed)), sample_size)
-dfm_sampled <- dfm_trimmed[sampled_rows, ]
-
-# convert to topicmodels format and run LDA
-dtm <- convert(dfm_sampled, to = "topicmodels")
-# lda_model <- LDA(dtm, k = 20, method = "Gibbs", control = list(seed = 1234))
-# takes foreverrr to run 
-
-# terms(lda_model, 20)
-# topic_weights <- posterior(lda_model)$topics
 
 
 ```
 
-# Process & LDA Model For 2 Person Interviews Discussing Immigration
 
 ```{r}
 
+# Define stemmed immigration patterns (or load dynamically)
+immigration_stems <- c("immigr", "migrat", "migrant", "refuge", "asylum",
+                       "deport", "citizenship", "visa", "undocu")
 
-# define immigration-related stems & filter 
-immigration_stems <- c(
-  "immigr", "migrat", "migrant", "refuge", "asylum",
-  "deport", "citizenship", "visa", "undocu"
-)
-
-immigration_stems_LDA <- c(
-  "immigr", "migrat", "migrant", "refuge", "asylum",
-  "deport", "citizenship", "visa", "undocu", "natur"
-)
-
-doc_index <- rowSums(dfm_select(dfm, pattern = immigration_stems_LDA)) > 0
+# Identify matching documents based on keyword hits
 doc_index_new <- rowSums(dfm_select(dfm, pattern = immigration_stems)) > 0
-dfm_filtered <- dfm[doc_index, ]
 
-dfm_immig <- dfm_trim(dfm_filtered, min_termfreq = 20)
+# Safely extract the corresponding episode IDs from the DFM
+matching_episodes <- docvars(dfm, "episode")[doc_index_new]
 
-# convert to topicmodels format and run lda
-dtmIM <- convert(dfm_immig, to = "topicmodels")
-
-if (!file.exists("lda_IMmodel.rds")) {
-  lda_IMmodel <- LDA(dtmIM, k = 4, method = "Gibbs", control = list(seed = 1234))
-  saveRDS(lda_IMmodel, "lda_IMmodel.rds")
-} else {
-  lda_IMmodel <- readRDS("lda_IMmodel.rds")
-}
-
-terms(lda_IMmodel, 20)
-
-# get topic weights per doc
-topic_weights <- posterior(lda_IMmodel)$topics
-dominant_topic <- apply(topic_weights, 1, which.max)
-
-# get matching metadata to convert back to df 
-ep_immigration <- ep_utterances[doc_index, ]
-topic_df <- data.frame(topic_weights)
-colnames(topic_df) <- as.character(seq_len(ncol(topic_df)))
-
-
-# assign 4-month period for aggregation
-
-# ok, so i changed the df size to 2k obs, i dont remember what did but i made the filtering more 
-#stringent. 
-topic_df$period <- floor_date(ep_immigration$episode_date, "4 months")
-
-# reshape and average topic weights
-topic_time <- topic_df %>%
-  pivot_longer(cols = c("1", "2", "3", "4"), names_to = "topic", values_to = "weight") %>%
-  group_by(period, topic) %>%
-  summarise(avg_weight = mean(weight), .groups = "drop")
-
-# define topic labels
-topic_labels <- c(
-  "1" = "Political framing",
-  "2" = "Personal stories",
-  "3" = "Security & foreign affairs",
-  "4" = "Public debate"
-)
-
-# map topic numbers to labels
-topic_time <- topic_time %>%
-  mutate(topic_label = factor(topic_labels[topic], levels = topic_labels))
+# Now subset from the original episode data by ID (not position)
+ep_immigration <- ep_utterances %>% filter(episode %in% matching_episodes)
 
 
 ```
-
-# Visualization
-
-### Immigration Topic Trends Over Time
-
-```{r}
-
-# plot
-ggplot(topic_time, aes(x = period, y = avg_weight, color = topic_label)) +
-  geom_line(linewidth = 0.7) +
-  labs(title = "Immigration Topic Trends Over Time",
-       x = "Month", y = "Average Topic Proportion",
-       color = "Topic") +
-  theme_minimal()
-
-```
-
-### Immigration as Share of Episodes
-
-```{r}
-
-ep_immigration_topics <- ep_immigration %>%
-  mutate(dominant_topic = dominant_topic) %>%
-  bind_cols(as.data.frame(topic_weights))
-
-
-ep_immigration_topics <- ep_immigration_topics %>%
-  mutate(topic_label = topic_labels[as.character(dominant_topic)])
-
-# immigration share of all episodes over time (4-month periods)
-ep_immigration_topics %>%
-  mutate(period = floor_date(episode_date, "4 months")) %>%
-  count(period, name = "immig_episodes") %>%
-  left_join(episodes %>%
-              mutate(period = floor_date(episode_date, "4 months")) %>%
-              count(period, name = "total_episodes"),
-            by = "period") %>%
-  mutate(share = immig_episodes / total_episodes) %>%
-  ggplot(aes(x = period, y = share)) +
-  geom_line(size = 0.7) +
-  labs(title = "Immigration Coverage as % of All Episodes Over Time",
-       x = "Date", y = "Percent of Episodes") +
-  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
-  theme_minimal()
-
-```
-
-### Immigration Coverage By Program
-
-```{r}
-# immigration coverage as % of all episodes per program
-ep_immigration_topics %>%
-  count(program, name = "immig_episodes") %>%
-  left_join(episodes %>% count(program, name = "total_episodes"), by = "program") %>%
-  mutate(immig_share = immig_episodes / total_episodes) %>%
-  filter(total_episodes >= 10) %>%  # optional: drop very small shows
-  slice_max(immig_share, n = 10) %>%
-  ggplot(aes(x = reorder(program, immig_share), y = immig_share)) +
-  geom_col(fill = "steelblue") +
-  labs(title = "Immigration coverage as % of all episodes",
-       x = "Program", y = "Percent immigration-related") +
-  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
-  coord_flip() +
-  theme_minimal()
-
-```
-
-### Sentiment By Immigration Framing Topic
-
-```{r}
-# sentiment by topic 
-ep_immigration_topics$sentiment <- get_sentiment(ep_immigration_topics$full_text, method = "afinn")
-
-ep_immigration_topics %>%
-  group_by(topic_label) %>%
-  summarise(avg_sentiment = mean(sentiment, na.rm = TRUE)) %>%
-  ggplot(aes(x = reorder(topic_label, avg_sentiment), y = avg_sentiment, fill = topic_label)) +
-  geom_col(show.legend = FALSE) +
-  labs(title = "Average sentiment by topic",
-       x = "Topic", y = "Avg sentiment score") +
-  coord_flip() +
-  theme_minimal()
-
-
-```
-
-### Host Sentiment By Framing Topic
-
-```{r}
-
-top_hosts <- ep_immigration_topics %>%
-  count(host_name, sort = TRUE) %>%
-  slice_head(n = 5) %>%
-  pull(host_name)
-
-top_host_data <- ep_immigration_topics %>%
-  filter(host_name %in% top_hosts)
-
-
-top_host_data %>%
-  group_by(host_name, topic_label) %>%
-  summarise(avg_sentiment = mean(sentiment, na.rm = TRUE), .groups = "drop") %>%
-  ggplot(aes(x = topic_label, y = avg_sentiment, fill = host_name)) +
-  geom_col(position = "dodge") +
-  labs(title = "Average Sentiment by Topic and Host",
-       x = "Topic", y = "Average Sentiment",
-       fill = "Host") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 30, hjust = 1))
-
-```
-
-### Host Framing Topic Distribution
-
-```{r}
-
-top_host_data %>%
-  count(host_name, topic_label) %>%
-  group_by(host_name) %>%
-  mutate(prop = n / sum(n)) %>%
-  ggplot(aes(x = host_name, y = prop, fill = topic_label)) +
-  geom_col(position = "fill") +
-  labs(title = "Topic Distribution by Top 5 Hosts",
-       x = "Host", y = "Proportion of Episodes",
-       fill = "Topic") +
-  theme_minimal()
-
-
-```
-
-#Pull ~100 Word Snippet 
 
 
 ```{r}
 
 
-ep_immigration <- ep_utterances[doc_index_new, ]
-
-# handcoding can easily be joined using episode number, a unique observation identifier. 
-
-immigration_stems <- c(
-  "immigr", "migrat", "migrant", "refuge", "asylum",
-  "deport", "citizenship", "visa", "undocu"
-)
-
-vec <- ep_immigration %>% 
-  select(full_text) %>% 
-  pull()
-
+# Define keyword pattern 
 pattern <- paste0(immigration_stems, collapse = "|")
 
-# Function: One snippet per episode
+# Function to extract one snippet per episode
 get_one_snippet <- function(text, pattern, window = 50) {
-  words <- unlist(tokenize_words(text, lowercase = TRUE))
-  matches <- which(str_detect(words, pattern))
-  
-  if (length(matches) == 0) return(NA_character_)  # no keyword
-  
-  # Build ±window for each match
+  words <- unlist(tokenizers::tokenize_words(text, lowercase = TRUE))
+  matches <- which(stringr::str_detect(words, pattern))
+
+  if (length(matches) == 0) return(NA_character_)
+
+  # Build windows around each match
   windows <- lapply(matches, function(i) c(max(1, i - window), min(length(words), i + window)))
-  
+
   # Merge overlapping windows
-  windows <- windows[order(sapply(windows, `[[`, 1))]  # sort by start index
+  windows <- windows[order(sapply(windows, `[[`, 1))]
   merged <- list()
   current <- windows[[1]]
-  
+
   for (w in windows[-1]) {
     if (w[1] <= current[2]) {
       current[2] <- max(current[2], w[2])  # extend current window
@@ -382,30 +172,26 @@ get_one_snippet <- function(text, pattern, window = 50) {
     }
   }
   merged <- append(merged, list(current))
-  
-  # Choose one merged snippet: random if multiple
+
+  # Choose one merged snippet at random
   chosen <- merged[[sample(length(merged), 1)]]
   snippet <- paste(words[chosen[1]:chosen[2]], collapse = " ")
   return(snippet)
 }
 
+snippets <- sapply(ep_immigration$full_text, get_one_snippet, pattern = pattern)
 
-snippets <- sapply(vec, get_one_snippet, pattern = pattern)
 
 snippets_df <- data.frame(
-  index = seq_along(snippets),
+  episode = ep_immigration$episode,
   snippet = snippets,
   stringsAsFactors = FALSE
 )
 
-if(!"snippet" %in% colnames(immigration)) {
-immigration <- cbind(snippets_df, ep_immigration)
-} else {
-  paste("stop")
-}
+# Join snippets back to metadata
+immigration <- left_join(snippets_df, ep_immigration, join_by(episode))
 
-immigration %>% 
-  select(-index)
+
 
 ```
 
@@ -415,7 +201,7 @@ immigration %>%
 
 ```{r}
 
-hc_complete <- read.csv("HandcodeComplete.csv")
+hc_complete <- read_csv("hc_complete.csv")
 
 all_categories <- c("Security.Threat", "Economic", "Humanitarian.Moral", "Other")
 
@@ -469,9 +255,155 @@ rater_matrix_t <- t(rater_matrix)
 kripp.alpha(rater_matrix_t, method = "nominal")
 
 
+sum(hc_complete$coder1_label != hc_complete$coder2_label, na.rm = TRUE)
+
+```
+
+#Bayes Classifier
+
+
+
+```{r}
+
+if (!"snippet" %in% names(hc_complete)) {
+  hc_complete <- hc_complete %>%
+    left_join(
+      immigration %>% select(episode, snippet),
+      by = c("matched_episode" = "episode")
+    )
+}
+
+# split into train/test sets
+set.seed(123)
+n <- nrow(hc_complete)
+train_index <- sample(seq_len(n), size = floor(0.75 * n))
+
+train_df <- hc_complete[train_index, ]
+test_df  <- hc_complete[-train_index, ]
+
+
+train_corp <- corpus(train_df, text_field = "snippet")
+test_corp  <- corpus(test_df,  text_field = "snippet")
+
+
+train_toks <- tokens(train_corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(stopwords("en"))
+
+test_toks <- tokens(test_corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
+  tokens_tolower() %>%
+  tokens_remove(stopwords("en"))
+
+
+train_dfm <- dfm(train_toks)
+
+test_dfm <- dfm(test_toks) %>%
+  dfm_match(featnames(train_dfm))
+
+
+docnames(train_dfm) <- train_df$matched_episode
+docnames(test_dfm)  <- test_df$matched_episode
+
+# use coder1_label as factor classification target
+train_df <- train_df %>%
+  mutate(label = factor(coder1_label))
+
+test_df <- test_df %>%
+  mutate(label = factor(coder1_label))
+
+# align DFM rows to metadata
+train_dfm <- train_dfm[docnames(train_dfm) %in% train_df$matched_episode, ]
+test_dfm  <- test_dfm[docnames(test_dfm) %in% test_df$matched_episode, ]
+
+# Naive Bayes model
+nb_model <- textmodel_nb(train_dfm, y = train_df$label)
+
+predicted <- predict(nb_model, newdata = test_dfm)
+test_df$predicted <- predicted
+
+# conf matrix
+confusion <- table(Predicted = predicted, Actual = test_df$label)
+print(confusion)
+
+# Accuracy
+accuracy <- sum(diag(confusion)) / sum(confusion)
+cat("Accuracy:", round(accuracy, 3), "\n")
+
+
+```
+
+
+```{r}
+
+library(ellmer)
+
+chat <- chat_google_gemini()
+
+classify_immigration_frame <- function(text) {
+  # Pause between calls to avoid rate-limiting
+  Sys.sleep(1.5)
+
+  prompt <- paste(
+    "Classify the following immigration-related text into one of four frames:\n\n",
+
+    "1. Security/Threat: Immigration as a threat to safety, legality, or national security.\n",
+    "   Keywords: illegal, deportation, border wall, crime, ICE, terrorism, smuggling\n",
+    
+    "2. Economic: Immigration framed through jobs, wages, taxes, or labor market impact.\n",
+    "   Keywords: jobs, labor, taxes, economy, employment, cost, contribution\n",
+    
+    "3. Humanitarian/Moral: Emphasizes suffering, dignity, or moral obligation.\n",
+    "   Keywords: asylum, refugee, family, trauma, discrimination, DACA, compassion\n",
+    
+    
+    "4. Other: Neutral, off-topic, or doesn't fit the above categories.\n\n",
+    
+    "Sometimes, a text may appear sympathetic but still evoke a Security/Threat frame. For example, a story that shows immigrants fleeing violence may still associate them with terrorism or crime in the reader’s mind. Classify such cases as Security/Threat, not Humanitarian."
+
+ "Examples:\n",
+"- 'ICE detained 12 undocumented migrants at the border.' → Security/Threat\n",
+"- 'A migrant fled gang violence and drug cartels.' → Security/Threat\n",   # <= key!
+"- 'Immigrants contribute billions in taxes.' → Economic\n",
+"- 'A child was separated from her parents at the border.' → Humanitarian/Moral\n",
+"- 'The episode focused on campaign strategy.' → Other\n\n",
+
+
+    "Now classify this:\n",
+    "Text: ", text, "\n",
+    "Respond with ONLY ONE of: Security/Threat, Economic, Humanitarian/Moral, Other"
+  )
+
+  result <- tryCatch({
+    response <- chat$chat(prompt)
+    response_clean <- tolower(response)
+
+    if (grepl("security", response_clean)) {
+      "Security/Threat"
+    } else if (grepl("economic", response_clean)) {
+      "Economic"
+    } else if (grepl("humanitarian|moral", response_clean)) {
+      "Humanitarian/Moral"
+    } else if (grepl("other", response_clean)) {
+      "Other"
+    } else {
+      "Unclear"
+    }
+  }, error = function(e) {
+    message("API error: ", e$message)
+    return(NA)
+  })
+
+  return(result)
+}
+
+
+
+hc_complete$gemini_label <- sapply(hc_complete$snippet, classify_immigration_frame)
+
+
+
 ```
 
 
 
 
-```{r}
