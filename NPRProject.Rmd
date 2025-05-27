@@ -4,7 +4,7 @@ output: html_document
 date: "2025-05-01"
 ---
 
-```{r setup, include = FALSE}
+```{r setup, results = 'hide'}
 
 
 rm(list = ls())
@@ -23,8 +23,11 @@ library(syuzhet)
 library(caret)
 library(irr)
 library(SnowballC)
-
-
+library(ellmer)
+library(data.table)
+library(e1071)
+library(randomForest)
+library(glmnet)
 
 
 # pull files 
@@ -43,7 +46,7 @@ walk(names(jsonfiles), ~ assign(.x, fromJSON(jsonfiles[[.x]], flatten = TRUE), e
 
 # Cleaning
 
-```{r, results = "hide"}
+```{r clean, results = "hide"}
 
 
 # Collapse to 1 observation per episode (full transcript and guest-only)
@@ -105,7 +108,7 @@ for (df_name in c("ep_utterances", "ep_utterancesG")) {
 
 # Preprocess Text
 
-```{r}
+```{r create dfm,  results = 'hide'}
 
 # create dfm with episode IDs stored as docvars
 ep_uttercorp <- corpus(ep_utterances, text_field = "full_text")
@@ -122,8 +125,7 @@ dfm <- dfm(toks)
 
 ```
 
-
-```{r}
+```{r immigration subset,  results = 'hide'}
 
 # Define stemmed immigration patterns (or load dynamically)
 immigration_stems <- c("immigr", "migrat", "migrant", "refuge", "asylum",
@@ -141,8 +143,7 @@ ep_immigration <- ep_utterances %>% filter(episode %in% matching_episodes)
 
 ```
 
-
-```{r}
+```{r snippet create,  results = 'hide'}
 
 
 # Define keyword pattern 
@@ -192,16 +193,14 @@ snippets_df <- data.frame(
 immigration <- left_join(snippets_df, ep_immigration, join_by(episode))
 
 
-
 ```
 
-# Inter-coder Reliability 
+# Inter-coder Reliability
 
+```{r intercoder reliability }
 
+invisible(hc_complete <- read_csv("hc_complete.csv", show_col_types = FALSE))
 
-```{r}
-
-hc_complete <- read_csv("hc_complete.csv")
 
 all_categories <- c("Security.Threat", "Economic", "Humanitarian.Moral", "Other")
 
@@ -255,15 +254,11 @@ rater_matrix_t <- t(rater_matrix)
 kripp.alpha(rater_matrix_t, method = "nominal")
 
 
-sum(hc_complete$coder1_label != hc_complete$coder2_label, na.rm = TRUE)
-
 ```
 
 #Bayes Classifier
 
-
-
-```{r}
+```{r bayes}
 
 if (!"snippet" %in% names(hc_complete)) {
   hc_complete <- hc_complete %>%
@@ -273,61 +268,202 @@ if (!"snippet" %in% names(hc_complete)) {
     )
 }
 
-# split into train/test sets
+
+# LOOCV
+
 set.seed(123)
 n <- nrow(hc_complete)
-train_index <- sample(seq_len(n), size = floor(0.75 * n))
 
-train_df <- hc_complete[train_index, ]
-test_df  <- hc_complete[-train_index, ]
-
-
-train_corp <- corpus(train_df, text_field = "snippet")
-test_corp  <- corpus(test_df,  text_field = "snippet")
-
-
-train_toks <- tokens(train_corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
+# Prepare full corpus and tokens once
+full_corp <- corpus(hc_complete, text_field = "snippet")
+full_toks <- tokens(full_corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
   tokens_tolower() %>%
-  tokens_remove(stopwords("en"))
+  tokens_remove(stopwords("en")) %>%
+  tokens_ngrams(n = 1:2)
 
-test_toks <- tokens(test_corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
-  tokens_tolower() %>%
-  tokens_remove(stopwords("en"))
-
-
-train_dfm <- dfm(train_toks)
-
-test_dfm <- dfm(test_toks) %>%
-  dfm_match(featnames(train_dfm))
+full_dfm <- dfm(full_toks) %>%
+  dfm_trim(min_termfreq = 5) %>%
+  dfm_weight(scheme = "prop")
 
 
-docnames(train_dfm) <- train_df$matched_episode
-docnames(test_dfm)  <- test_df$matched_episode
+# True labels and matched docnames
+true_labels <- factor(hc_complete$coder1_label)
+doc_ids <- hc_complete$matched_episode
 
-# use coder1_label as factor classification target
-train_df <- train_df %>%
-  mutate(label = factor(coder1_label))
+# Store predictions
+all_predictions <- character(n)
 
-test_df <- test_df %>%
-  mutate(label = factor(coder1_label))
+for (i in 1:n) {
+  # Split LOOCV train/test
+  train_dfm <- full_dfm[-i, ]
+  test_dfm <- full_dfm[i, , drop = FALSE]
+  
+  train_labels <- true_labels[-i]
+  
+  # Match features
+  test_dfm <- dfm_match(test_dfm, featnames(train_dfm))
+  
+  # Train Naive Bayes
+  nb_model <- textmodel_nb(train_dfm, y = train_labels)
 
-# align DFM rows to metadata
-train_dfm <- train_dfm[docnames(train_dfm) %in% train_df$matched_episode, ]
-test_dfm  <- test_dfm[docnames(test_dfm) %in% test_df$matched_episode, ]
+  # Predict
+  pred <- predict(nb_model, newdata = test_dfm)
+  all_predictions[i] <- as.character(unname(pred))
+}
 
-# Naive Bayes model
-nb_model <- textmodel_nb(train_dfm, y = train_df$label)
+# Add predictions back to data
+hc_complete$predicted <- factor(all_predictions, levels = levels(true_labels))
 
-predicted <- predict(nb_model, newdata = test_dfm)
-test_df$predicted <- predicted
+# Confusion matrix
+conf_matrix <- confusionMatrix(hc_complete$predicted, true_labels)
 
-# conf matrix
-confusion <- table(Predicted = predicted, Actual = test_df$label)
-print(confusion)
+conf_matrix
 
-# Accuracy
-accuracy <- sum(diag(confusion)) / sum(confusion)
-cat("Accuracy:", round(accuracy, 3), "\n")
+# Output precision and recall per class
+print(conf_matrix$byClass[, c("Precision", "Recall")])
+
+
+table(true_labels)
+table(hc_complete$predicted)
+
+
+```
+
+```{r}
+
+
+# === Load GloVe embeddings ===
+glove_file <- "glove.6B.100d.txt"
+glove_raw <- fread(
+  glove_file,
+  header = FALSE,
+  quote = "",
+  colClasses = c("character", rep("numeric", 100))
+)
+setnames(glove_raw, c("word", paste0("V", 1:100)))
+
+# === Prepare document embeddings ===
+tokenized <- strsplit(tolower(hc_complete$snippet), "\\s+")
+
+doc_embeddings <- t(sapply(tokenized, function(words) {
+  matched <- glove_raw[glove_raw$word %in% words]
+  if (nrow(matched) > 0) {
+    colMeans(as.matrix(matched[, -1, with = FALSE]))
+  } else {
+    rep(0, 100)
+  }
+}))
+
+# === Reduce dimensionality ===
+pca <- prcomp(doc_embeddings, center = TRUE, scale. = TRUE)
+reduced_embeddings <- pca$x[, 1:30]  # Using top 30 PCs
+
+# === Set up labels ===
+true_labels <- factor(hc_complete$coder1_label)
+n_total <- nrow(hc_complete)
+
+# === Train/Test Split (80 docs) ===
+set.seed(123)
+if (n_total <= 80) {
+  train_idx <- sample(seq_len(n_total), floor(0.8 * n_total))
+} else {
+  train_idx <- sample(seq_len(n_total), 80)
+}
+test_idx <- setdiff(seq_len(n_total), train_idx)
+
+train_x <- reduced_embeddings[train_idx, ]
+train_y <- true_labels[train_idx]
+test_x <- reduced_embeddings[test_idx, ]
+test_y <- true_labels[test_idx]
+
+# === Calculate class weights ===
+class_counts <- table(train_y)
+inv_weights <- sum(class_counts) / (length(class_counts) * class_counts)
+inv_weights <- as.list(inv_weights)
+names(inv_weights) <- names(class_counts)
+
+cat("Class weights:\n")
+print(inv_weights)
+
+# === Train weighted SVM ===
+weighted_svm <- svm(
+  x = train_x,
+  y = train_y,
+  kernel = "linear",
+  class.weights = inv_weights
+)
+
+# === Predict and evaluate ===
+weighted_pred <- predict(weighted_svm, test_x)
+weighted_conf <- confusionMatrix(weighted_pred, test_y)
+
+cat("\n=== Weighted SVM Performance ===\n")
+print(weighted_conf)
+print(weighted_conf$byClass[, c("Precision", "Recall")])
+
+# === Train unweighted SVM ===
+unweighted_svm <- svm(
+  x = train_x,
+  y = train_y,
+  kernel = "linear"
+)
+
+# === Predict and evaluate ===
+unweighted_pred <- predict(unweighted_svm, test_x)
+unweighted_conf <- confusionMatrix(unweighted_pred, test_y)
+
+cat("\n=== Unweighted SVM Performance ===\n")
+print(unweighted_conf)
+print(unweighted_conf$byClass[, c("Precision", "Recall")])
+
+
+```
+
+
+
+
+```{r}
+
+
+# === Set up input ===
+# (Already reduced embeddings from PCA)
+X <- reduced_embeddings
+Y <- true_labels
+
+# Encode as numeric matrix
+Y_numeric <- as.numeric(Y)  # glmnet needs numeric class labels
+
+# === Train/Test Split (same logic) ===
+set.seed(123)
+if (nrow(X) <= 80) {
+  train_idx <- sample(seq_len(nrow(X)), floor(0.8 * nrow(X)))
+} else {
+  train_idx <- sample(seq_len(nrow(X)), 80)
+}
+test_idx <- setdiff(seq_len(nrow(X)), train_idx)
+
+train_x <- X[train_idx, ]
+train_y <- Y[train_idx]
+test_x <- X[test_idx, ]
+test_y <- Y[test_idx]
+
+# === Fit LASSO Multinomial Logistic Regression ===
+lasso_model <- cv.glmnet(
+  x = train_x,
+  y = train_y,
+  family = "multinomial",
+  alpha = 1  # LASSO penalty
+)
+
+# === Predict ===
+predictions <- predict(lasso_model, newx = test_x, s = "lambda.min", type = "class")
+predictions <- factor(predictions, levels = levels(Y))
+
+# === Evaluate ===
+conf_matrix <- confusionMatrix(predictions, test_y)
+print(conf_matrix)
+print(conf_matrix$byClass[, c("Precision", "Recall")])
+
 
 
 ```
@@ -335,48 +471,80 @@ cat("Accuracy:", round(accuracy, 3), "\n")
 
 ```{r}
 
+# Combine data
+train_data <- data.frame(train_x)
+train_data$label <- train_y
+
+# Upsample minority classes
+set.seed(123)
+balanced_data <- upSample(x = train_x, y = train_y)
+
+# Train Random Forest
+rf_model <- randomForest(x = balanced_data[, -ncol(balanced_data)], y = balanced_data$Class, ntree = 500)
+
+# Predict on test set
+predictions <- predict(rf_model, test_x)
+
+# Evaluate
+conf_matrix <- confusionMatrix(predictions, test_y)
+print(conf_matrix)
+print(conf_matrix$byClass[, c("Precision", "Recall")])
+
+
+```
+
+
+
+
+
+```{r gemini, results = "hide" }
 library(ellmer)
 
-chat <- chat_google_gemini()
+chat <- ellmer::chat_google_gemini()
+
 
 classify_immigration_frame <- function(text) {
-  # Pause between calls to avoid rate-limiting
-  Sys.sleep(1.5)
-
+  Sys.sleep(5)  # avoid rate limits
+  
   prompt <- paste(
     "Classify the following immigration-related text into one of four frames:\n\n",
-
-    "1. Security/Threat: Immigration as a threat to safety, legality, or national security.\n",
-    "   Keywords: illegal, deportation, border wall, crime, ICE, terrorism, smuggling\n",
     
-    "2. Economic: Immigration framed through jobs, wages, taxes, or labor market impact.\n",
-    "   Keywords: jobs, labor, taxes, economy, employment, cost, contribution\n",
+    "1. Security/Threat Frame:\n",
+    "Articles that primarily frame immigration as a threat to national security, public safety, or the legal order.\n",
+    "Includes illegal entry, smuggling, border crossings, ICE raids, deportations, crime, terrorism, national security concerns, law-and-order rhetoric.\n",
+    "Keywords: illegal, deportation, border wall, crime, ICE, security, terrorism, smuggling, cartels, public safety\n\n",
     
-    "3. Humanitarian/Moral: Emphasizes suffering, dignity, or moral obligation.\n",
-    "   Keywords: asylum, refugee, family, trauma, discrimination, DACA, compassion\n",
+    "2. Economic Frame:\n",
+    "Articles focusing on the financial or labor market implications of immigration.\n",
+    "Includes immigrant workers, funding, wages, employment, taxes, entrepreneurship, remittances, business demand, fiscal burden or benefit.\n",
+    "Keywords: jobs, labor, taxes, contribution, costs, economic growth, shortages, employment, undocumented workers\n\n",
     
+    "3. Humanitarian/Moral Frame:\n",
+    "Articles highlighting lived experiences, rights, or moral standing of immigrants/refugees.\n",
+    "Includes asylum seekers, refugees, family separation, living conditions, trauma, discrimination, civil society efforts.\n",
+    "Keywords: asylum, refugee, family, rights, trauma, detention, inclusion, discrimination, DACA, compassion, migrant children\n\n",
     
-    "4. Other: Neutral, off-topic, or doesn't fit the above categories.\n\n",
+    "4. Other:\n",
+    "Overly procedural discussions or broad political overviews that only tangentially mention immigration.\n\n",
     
-    "Sometimes, a text may appear sympathetic but still evoke a Security/Threat frame. For example, a story that shows immigrants fleeing violence may still associate them with terrorism or crime in the reader’s mind. Classify such cases as Security/Threat, not Humanitarian."
-
- "Examples:\n",
-"- 'ICE detained 12 undocumented migrants at the border.' → Security/Threat\n",
-"- 'A migrant fled gang violence and drug cartels.' → Security/Threat\n",   # <= key!
-"- 'Immigrants contribute billions in taxes.' → Economic\n",
-"- 'A child was separated from her parents at the border.' → Humanitarian/Moral\n",
-"- 'The episode focused on campaign strategy.' → Other\n\n",
-
-
+    "Important: Even if a story seems sympathetic, if it evokes associations with security or crime (e.g., fleeing violence from cartels), classify as Security/Threat.\n\n",
+    
+    "Examples:\n",
+    "- 'ICE detained 12 undocumented migrants at the border.' → Security/Threat\n",
+    "- 'A migrant fled gang violence and drug cartels.' → Security/Threat\n",
+    "- 'Immigrants contribute billions in taxes.' → Economic\n",
+    "- 'A child was separated from her parents at the border.' → Humanitarian/Moral\n",
+    "- 'The episode focused on campaign strategy.' → Other\n\n",
+    
     "Now classify this:\n",
     "Text: ", text, "\n",
     "Respond with ONLY ONE of: Security/Threat, Economic, Humanitarian/Moral, Other"
   )
-
+  
   result <- tryCatch({
     response <- chat$chat(prompt)
     response_clean <- tolower(response)
-
+    
     if (grepl("security", response_clean)) {
       "Security/Threat"
     } else if (grepl("economic", response_clean)) {
@@ -392,13 +560,34 @@ classify_immigration_frame <- function(text) {
     message("API error: ", e$message)
     return(NA)
   })
-
+  
   return(result)
 }
 
 
-
 hc_complete$gemini_label <- sapply(hc_complete$snippet, classify_immigration_frame)
+
+
+```
+
+
+
+
+
+
+```{r gemini results}
+
+# Calculate precision & recall
+hc_complete$gemini_label <- gsub("/", ".", hc_complete$gemini_label)
+
+true_labels <- factor(hc_complete$coder1_label)
+predicted_labels <- factor(hc_complete$gemini_label, levels = levels(true_labels))
+
+conf_matrix <- confusionMatrix(predicted_labels, true_labels)
+
+conf_matrix
+# Print precision and recall table
+print(conf_matrix$byClass[, c("Precision", "Recall")])
 
 
 

@@ -1,11 +1,10 @@
 ---
-title: "NPR Project"
+title: "LDA"
 output: html_document
 date: "2025-05-01"
 ---
 
-```{r setup, include = FALSE}
-
+```{r, include = F}
 
 rm(list = ls())
 
@@ -15,14 +14,10 @@ library(jsonlite)
 library(purrr)
 library(lubridate)
 library(quanteda)  
-library(quanteda.textmodels)
 library(here)
 library(tokenizers)
 library(topicmodels)
 library(syuzhet)
-library(caret)
-library(irr)
-
 
 
 # pull files 
@@ -42,63 +37,64 @@ walk(names(jsonfiles), ~ assign(.x, fromJSON(jsonfiles[[.x]], flatten = TRUE), e
 # Cleaning
 
 ```{r, results = "hide"}
-library(dplyr)
-library(glue)
-library(purrr)
-library(lubridate)
 
-# 1. Collapse to 1 observation per episode (full transcript and guest-only)
+
+# collapse to 1 ob per ep
 ep_utterances <- utterances.2sp %>%
   group_by(episode) %>%
   summarise(full_text = paste(utterance, collapse = " "), .groups = "drop")
 
+# collapse but w only guest speech
 ep_utterancesG <- utterances.2sp %>%
   filter(!is_host) %>%
   group_by(episode) %>%
   summarise(full_text = paste(utterance, collapse = " "), .groups = "drop")
 
-# 2. Collapse host names to comma-separated string per episode
+# host id extract & pull metadata from list 
+host_id2sp <- utterances.2sp %>%
+  filter(host_id != -1) %>%
+  distinct(episode, host_id)
+
 host_episode_df <- map_dfr(host.map, ~ tibble(
   episode = .x$episodes,
   host_name = .x$name
-)) %>%
-  group_by(episode) %>%
-  summarise(host_name = paste(unique(host_name), collapse = ", "), .groups = "drop")
+))
 
-# 3. Define safe left_join function to avoid overwriting existing columns
+# function for joins w out redundancy 
 safe_join <- function(df, join_df, by_col, new_col) {
   if (!(new_col %in% colnames(df))) {
     df <- df %>% left_join(join_df, by = by_col)
   } else {
-    stop(glue("'{new_col}' already exists"))
+    stop(glue::glue("'{new_col}' already exists"))
   }
   return(df)
 }
 
-# 4. Loop through both datasets to attach host metadata and enrich features
+
+# preprocessing loop for df w/wout the host speech (but w host metadata)
 for (df_name in c("ep_utterances", "ep_utterancesG")) {
   df <- get(df_name)
 
+  df <- safe_join(df, host_id2sp, "episode", "host_id")
   df <- safe_join(df, host_episode_df, "episode", "host_name")
   df <- safe_join(df, episodes, join_by(episode == id), "title")
 
-  # Convert program to factor (if present)
+  # program as factor for vis 
   if ("program" %in% colnames(df)) {
     df$program <- as.factor(df$program)
   }
 
-  # Parse episode_date and create derived date columns (if present)
+  # date processing w lubridate
   if ("episode_date" %in% colnames(df)) {
     df <- df %>%
       mutate(
         episode_date = as.Date(episode_date),
         year = year(episode_date),
-        month = month(episode_date, label = TRUE),
-        weekday = wday(episode_date, label = TRUE)
+        month = lubridate::month(episode_date, label = TRUE),
+        weekday = lubridate::wday(episode_date, label = TRUE)
       )
   }
 
-  # Save processed data frame back to environment
   assign(df_name, df, envir = .GlobalEnv)
 }
 
@@ -107,7 +103,7 @@ for (df_name in c("ep_utterances", "ep_utterancesG")) {
 
 # Preprocess Text
 
-```{r}
+```{r , results = "hide"}
 
 
 # corpus and tokenize
@@ -119,7 +115,7 @@ toks <- tokens(ep_uttercorp, remove_punct = TRUE, remove_numbers = TRUE) %>%
 
 # create and trim dfm (high freq bar)
 dfm <- dfm(toks)
-dfm_trimmed <- dfm_trim(dfm, min_termfreq = 50)
+dfm_trimmed <- dfm_trim(dfm, min_termfreq = 100)
 
 # sampling so i can run/not too large
 set.seed(123)
@@ -142,20 +138,13 @@ dtm <- convert(dfm_sampled, to = "topicmodels")
 
 ```{r}
 
-
 # define immigration-related stems & filter 
 immigration_stems <- c(
   "immigr", "migrat", "migrant", "refuge", "asylum",
-  "deport", "citizenship", "visa", "undocu"
+  "deport", "citizenship", "visa", "natur", "undocu"
 )
 
-immigration_stems_LDA <- c(
-  "immigr", "migrat", "migrant", "refuge", "asylum",
-  "deport", "citizenship", "visa", "undocu", "natur"
-)
-
-doc_index <- rowSums(dfm_select(dfm, pattern = immigration_stems_LDA)) > 0
-doc_index_new <- rowSums(dfm_select(dfm, pattern = immigration_stems)) > 0
+doc_index <- rowSums(dfm_select(dfm, pattern = immigration_stems)) > 0
 dfm_filtered <- dfm[doc_index, ]
 
 dfm_immig <- dfm_trim(dfm_filtered, min_termfreq = 20)
@@ -169,7 +158,6 @@ if (!file.exists("lda_IMmodel.rds")) {
 } else {
   lda_IMmodel <- readRDS("lda_IMmodel.rds")
 }
-
 terms(lda_IMmodel, 20)
 
 # get topic weights per doc
@@ -181,11 +169,7 @@ ep_immigration <- ep_utterances[doc_index, ]
 topic_df <- data.frame(topic_weights)
 colnames(topic_df) <- as.character(seq_len(ncol(topic_df)))
 
-
 # assign 4-month period for aggregation
-
-# ok, so i changed the df size to 2k obs, i dont remember what did but i made the filtering more 
-#stringent. 
 topic_df$period <- floor_date(ep_immigration$episode_date, "4 months")
 
 # reshape and average topic weights
@@ -206,20 +190,27 @@ topic_labels <- c(
 topic_time <- topic_time %>%
   mutate(topic_label = factor(topic_labels[topic], levels = topic_labels))
 
+
 ```
+
+# Visualization
+
+### Immigration Topic Trends Over Time
 
 ```{r}
 
-# plot
+
 ggplot(topic_time, aes(x = period, y = avg_weight, color = topic_label)) +
-  geom_line(linewidth = 0.7) +
-  labs(title = "Immigration Topic Trends Over Time",
-       x = "Month", y = "Average Topic Proportion",
+  geom_line(size = 0.7) +
+  labs(title = "Immigration topic trends over time",
+       x = "Month", y = "Average topic proportion",
        color = "Topic") +
   theme_minimal()
 
 ```
+# More Visualization 
 
+### Immigration as Share of Episodes
 
 ```{r}
 
@@ -249,9 +240,9 @@ ep_immigration_topics %>%
 
 ```
 
+### Immigration Coverage By Program
 
 ```{r}
-
 # immigration coverage as % of all episodes per program
 ep_immigration_topics %>%
   count(program, name = "immig_episodes") %>%
@@ -269,6 +260,7 @@ ep_immigration_topics %>%
 
 ```
 
+### Sentiment By Topic
 
 ```{r}
 # sentiment by topic 
@@ -285,9 +277,13 @@ ep_immigration_topics %>%
   theme_minimal()
 
 
+
 ```
 
+### Host Sentiment By Topic
+
 ```{r}
+
 
 top_hosts <- ep_immigration_topics %>%
   count(host_name, sort = TRUE) %>%
@@ -311,6 +307,8 @@ top_host_data %>%
 
 ```
 
+### Host Topic Distribution
+
 ```{r}
 
 top_host_data %>%
@@ -326,3 +324,4 @@ top_host_data %>%
 
 
 ```
+
