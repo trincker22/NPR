@@ -4,10 +4,9 @@ output: html_document
 date: "2025-05-01"
 ---
 
-```{r setup, results = 'hide'}
+```{r, results = 'hide', message = FALSE, warning = FALSE}
 
 
-rm(list = ls())
 
 library(tidyverse)
 library(readr)
@@ -95,8 +94,8 @@ for (df_name in c("ep_utterances", "ep_utterancesG")) {
       mutate(
         episode_date = as.Date(episode_date),
         year = year(episode_date),
-        month = month(episode_date, label = TRUE),
-        weekday = wday(episode_date, label = TRUE)
+        month = lubridate::month(episode_date, label = TRUE),
+        weekday = lubridate::wday(episode_date, label = TRUE)
       )
   }
 
@@ -256,7 +255,7 @@ kripp.alpha(rater_matrix_t, method = "nominal")
 
 ```
 
-#Bayes Classifier
+# Bayes Classifier
 
 ```{r bayes}
 
@@ -419,8 +418,7 @@ print(unweighted_conf$byClass[, c("Precision", "Recall")])
 
 ```
 
-
-
+# LASSO
 
 ```{r}
 
@@ -466,10 +464,20 @@ print(conf_matrix$byClass[, c("Precision", "Recall")])
 
 
 
+
 ```
 
+# Random Forest
 
 ```{r}
+
+
+hc_complete <- hc_complete %>% 
+  left_join(immigration %>%  
+              select(episode, lda_based_frame), 
+            join_by(matched_episode== episode))
+
+
 
 # Combine data
 train_data <- data.frame(train_x)
@@ -493,15 +501,13 @@ print(conf_matrix$byClass[, c("Precision", "Recall")])
 
 ```
 
+# LLM
 
-
-
-
-```{r gemini, results = "hide" }
+```{r gemini, eval = F }
 library(ellmer)
 
-chat <- ellmer::chat_google_gemini()
 
+chat <- ellmer::chat_google_gemini()
 
 classify_immigration_frame <- function(text) {
   Sys.sleep(5)  # avoid rate limits
@@ -509,32 +515,38 @@ classify_immigration_frame <- function(text) {
   prompt <- paste(
     "Classify the following immigration-related text into one of four frames:\n\n",
     
-    "1. Security/Threat Frame:\n",
-    "Articles that primarily frame immigration as a threat to national security, public safety, or the legal order.\n",
-    "Includes illegal entry, smuggling, border crossings, ICE raids, deportations, crime, terrorism, national security concerns, law-and-order rhetoric.\n",
+    "Security/Threat Frame\n",
+    "Articles that primarily frame immigration as a threat to national security, public safety, or the legal order. Even if a story seems sympathetic, if it evokes associations with security or crime (e.g., fleeing violence from cartels), classify as Security/Threat.\n",
+    "Focus on illegal entry, smuggling, or border crossings\n",
+    "Coverage of immigration enforcement (e.g., ICE raids, deportations)\n",
+    "Crime or terrorism tied to immigrants or asylum seekers\n",
+    "National security concerns or protective measures\n",
+    "Political rhetoric focused on law and order\n",
     "Keywords: illegal, deportation, border wall, crime, ICE, security, terrorism, smuggling, cartels, public safety\n\n",
     
-    "2. Economic Frame:\n",
-    "Articles focusing on the financial or labor market implications of immigration.\n",
-    "Includes immigrant workers, funding, wages, employment, taxes, entrepreneurship, remittances, business demand, fiscal burden or benefit.\n",
+    "Economic Frame\n",
+    "Articles that focus on the financial or labor market implications of immigration.\n",
+    "Immigrants as workers in specific industries\n",
+    "Central focus on appropriations/funding of immigration issues, even if the funding debate leads speakers to make arguments that fall into one of the other categories.\n",
+    "Impact on wages, employment, housing, or taxes\n",
+    "Economic contributions (e.g., entrepreneurship, GDP, remittances)\n",
+    "Business demand for migrant labor or work visas\n",
+    "Fiscal burden or benefit arguments\n",
     "Keywords: jobs, labor, taxes, contribution, costs, economic growth, shortages, employment, undocumented workers\n\n",
     
-    "3. Humanitarian/Moral Frame:\n",
-    "Articles highlighting lived experiences, rights, or moral standing of immigrants/refugees.\n",
-    "Includes asylum seekers, refugees, family separation, living conditions, trauma, discrimination, civil society efforts.\n",
+    "Humanitarian/Moral Frame\n",
+    "Articles that highlight the lived experiences, rights, or moral standing of immigrants and refugees.\n",
+    "Stories of asylum seekers, refugees, or displaced families\n",
+    "Discussion of living conditions is the strongest predictor of this frame. Next;\n",
+    "Focus on human suffering, trauma, or discrimination\n",
+    "Coverage of family separation, detainment, or access to services\n",
+    "Discussions of inclusion, dignity, or moral responsibility\n",
+    "Civil society efforts to aid or defend migrant\n",
     "Keywords: asylum, refugee, family, rights, trauma, detention, inclusion, discrimination, DACA, compassion, migrant children\n\n",
     
-    "4. Other:\n",
-    "Overly procedural discussions or broad political overviews that only tangentially mention immigration.\n\n",
-    
-    "Important: Even if a story seems sympathetic, if it evokes associations with security or crime (e.g., fleeing violence from cartels), classify as Security/Threat.\n\n",
-    
-    "Examples:\n",
-    "- 'ICE detained 12 undocumented migrants at the border.' → Security/Threat\n",
-    "- 'A migrant fled gang violence and drug cartels.' → Security/Threat\n",
-    "- 'Immigrants contribute billions in taxes.' → Economic\n",
-    "- 'A child was separated from her parents at the border.' → Humanitarian/Moral\n",
-    "- 'The episode focused on campaign strategy.' → Other\n\n",
+    "Other\n",
+    "Mention of immigration is offhand, not the major focus of the piece—for example, coverage of a session of congress where immigration is a topic of focus, but immigration is merely tangential. Or, discussion of presidential approval rates, and immigration is mentioned as a topic influencing the results, but is not the focus of the piece. Finally, snippets generally not relevant to other categories should fall here.\n",
+    "Broad overview of political position/environment that only tangentially mentions immigration.\n\n",
     
     "Now classify this:\n",
     "Text: ", text, "\n",
@@ -565,21 +577,18 @@ classify_immigration_frame <- function(text) {
 }
 
 
-hc_complete$gemini_label <- sapply(hc_complete$snippet, classify_immigration_frame)
+hc_complete$gemini_label <- sapply(immigration$snippet, classify_immigration_frame)
 
 
 ```
 
-
-
-
-
-
-```{r gemini results}
+```{r gemini results, eval = F}
 
 # Calculate precision & recall
 hc_complete$gemini_label <- gsub("/", ".", hc_complete$gemini_label)
 
+
+names(hc_complete)
 true_labels <- factor(hc_complete$coder1_label)
 predicted_labels <- factor(hc_complete$gemini_label, levels = levels(true_labels))
 
@@ -594,5 +603,169 @@ print(conf_matrix$byClass[, c("Precision", "Recall")])
 ```
 
 
+```{r}
+
+#Batched prompt to classify entire immigration df 
+
+chat <- ellmer::chat_google_gemini()
+
+classify_immigration_batch <- function(text_batch) {
+  Sys.sleep(7) 
+
+  prompt <- paste(
+    "Classify the following 3 immigration-related texts separately into one of four frames:\n\n",
+    
+    "Security/Threat Frame\n",
+    "Articles that primarily frame immigration as a threat to national security, public safety, or the legal order. Even if a story seems sympathetic, if it evokes associations with security or crime (e.g., fleeing violence from cartels), classify as Security/Threat.\n",
+    "Focus on illegal entry, smuggling, or border crossings\n",
+    "Coverage of immigration enforcement (e.g., ICE raids, deportations)\n",
+    "Crime or terrorism tied to immigrants or asylum seekers\n",
+    "National security concerns or protective measures\n",
+    "Political rhetoric focused on law and order\n",
+    "Keywords: illegal, deportation, border wall, crime, ICE, security, terrorism, smuggling, cartels, public safety\n\n",
+    
+    "Economic Frame\n",
+    "Articles that focus on the financial or labor market implications of immigration.\n",
+    "Immigrants as workers in specific industries\n",
+    "Central focus on appropriations/funding of immigration issues, even if the funding debate leads speakers to make arguments that fall into one of the other categories.\n",
+    "Impact on wages, employment, housing, or taxes\n",
+    "Economic contributions (e.g., entrepreneurship, GDP, remittances)\n",
+    "Business demand for migrant labor or work visas\n",
+    "Fiscal burden or benefit arguments\n",
+    "Keywords: jobs, labor, taxes, contribution, costs, economic growth, shortages, employment, undocumented workers\n\n",
+    
+    "Humanitarian/Moral Frame\n",
+    "Articles that highlight the lived experiences, rights, or moral standing of immigrants and refugees.\n",
+    "Stories of asylum seekers, refugees, or displaced families\n",
+    "Discussion of living conditions is the strongest predictor of this frame. Next;\n",
+    "Focus on human suffering, trauma, or discrimination\n",
+    "Coverage of family separation, detainment, or access to services\n",
+    "Discussions of inclusion, dignity, or moral responsibility\n",
+    "Civil society efforts to aid or defend migrant\n",
+    "Keywords: asylum, refugee, family, rights, trauma, detention, inclusion, discrimination, DACA, compassion, migrant children\n\n",
+    
+    "Other\n",
+    "Mention of immigration is offhand, not the major focus of the piece—for example, coverage of a session of congress where immigration is a topic of focus, but immigration is merely tangential. Or, discussion of presidential approval rates, and immigration is mentioned as a topic influencing the results, but is not the focus of the piece. Finally, snippets generally not relevant to other categories should fall here.\n",
+    "Broad overview of political position/environment that only tangentially mentions immigration.\n\n",
+    
+    "Now classify these:\n",
+    paste0("Text 1: ", text_batch[1], "\n"),
+    paste0("Text 2: ", text_batch[2], "\n"),
+    paste0("Text 3: ", text_batch[3], "\n"),
+    "Respond ONLY with three lines:\n1) [frame]\n2) [frame]\n3) [frame]"
+  )
+
+  result <- tryCatch({
+    response <- chat$chat(prompt)
+    response_lines <- strsplit(response, "\n")[[1]]
+    
+    frames <- sapply(response_lines, function(line) {
+      line_clean <- tolower(gsub("^\\d+\\)\\s*", "", line))
+      if (grepl("security", line_clean)) {
+        "Security/Threat"
+      } else if (grepl("economic", line_clean)) {
+        "Economic"
+      } else if (grepl("humanitarian|moral", line_clean)) {
+        "Humanitarian/Moral"
+      } else if (grepl("other", line_clean)) {
+        "Other"
+      } else {
+        "Unclear"
+      }
+    })
+
+    return(frames)
+    
+  }, error = function(e) {
+    message("API error on batch: ", e$message)
+    return(rep(NA, 3))
+  })
+  
+  return(result)
+}
+
+texts <- immigration$snippet
+
+# Split into batches of 3
+batches <- split(texts, ceiling(seq_along(texts) / 3))
+
+# Load existing results if they exist
+if (exists("final_results")) {
+  processed_indices <- final_results$index
+  start_batch <- ceiling(max(processed_indices) / 3) + 1
+  cat("Resuming from batch", start_batch, "of", length(batches), "\n")
+  
+  all_results <- split(final_results, ceiling(final_results$index / 3))
+} else {
+  start_batch <- 1
+  all_results <- list()
+}
 
 
+for (i in start_batch:length(batches)) {
+  batch <- batches[[i]]
+  
+  # Ensure the batch has exactly 3 items 
+  while (length(batch) < 3) {
+    batch <- c(batch, "")
+  }
+  
+  cat("Processing batch", i, "of", length(batches), "\n")
+  
+  frames <- classify_immigration_batch(batch)
+  
+  indices <- ((i - 1) * 3 + 1):min(i * 3, length(texts))
+  
+  all_results[[i]] <- data.frame(
+    index = indices,
+    frame = frames[1:length(indices)]  # trim extra if padded
+  )
+
+  
+  if (i %% 10 == 0) {
+    saveRDS(do.call(rbind, all_results), file = "checkpoint_results.rds")
+    cat("Checkpoint saved at batch", i, "\n")
+  }
+}
+
+final_results <- do.call(rbind, all_results)
+immigration$gemini_label <- final_results$frame
+
+
+
+
+
+# NA handling
+na_indices <- final_results$index[is.na(final_results$frame)]
+
+cat("Number of NA entries:", length(na_indices), "\n")
+
+
+na_batches <- unique(ceiling(na_indices / 3))
+
+cat("Number of batches to re-run:", length(na_batches), "\n")
+
+
+for (i in na_batches) {
+  batch <- batches[[i]]
+  
+  while (length(batch) < 3) {
+    batch <- c(batch, "")
+  }
+  
+  cat("Re-running batch", i, "of", length(batches), "\n")
+  
+  frames <- classify_immigration_batch(batch)
+  
+  indices <- ((i - 1) * 3 + 1):min(i * 3, length(texts))
+  
+  # Update final_results in place
+  final_results$frame[final_results$index %in% indices] <- frames[1:length(indices)]
+  
+  # Optional: save checkpoint after each retry
+  saveRDS(final_results, "checkpoint_results_retry.rds")
+}
+
+
+
+```
