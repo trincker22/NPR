@@ -510,7 +510,7 @@ library(ellmer)
 chat <- ellmer::chat_google_gemini()
 
 classify_immigration_frame <- function(text) {
-  Sys.sleep(5)  # avoid rate limits
+  Sys.sleep(15)  # requests per minute isnt an issue, BUT this prompt is large and requires a lot of tokens, so it will hit the token per minute limit even though there are unlimited tokens overall. 15 is most reliable for me but ofc extremely slow
   
   prompt <- paste(
     "Classify the following immigration-related text into one of four frames:\n\n",
@@ -587,8 +587,6 @@ hc_complete$gemini_label <- sapply(immigration$snippet, classify_immigration_fra
 # Calculate precision & recall
 hc_complete$gemini_label <- gsub("/", ".", hc_complete$gemini_label)
 
-
-names(hc_complete)
 true_labels <- factor(hc_complete$coder1_label)
 predicted_labels <- factor(hc_complete$gemini_label, levels = levels(true_labels))
 
@@ -610,7 +608,7 @@ print(conf_matrix$byClass[, c("Precision", "Recall")])
 chat <- ellmer::chat_google_gemini()
 
 classify_immigration_batch <- function(text_batch) {
-  Sys.sleep(7) 
+  Sys.sleep(15) 
 
   prompt <- paste(
     "Classify the following 3 immigration-related texts separately into one of four frames:\n\n",
@@ -731,9 +729,7 @@ for (i in start_batch:length(batches)) {
 final_results <- do.call(rbind, all_results)
 immigration$gemini_label <- final_results$frame
 
-
-
-
+summary(as.factor(final_results$frame))
 
 # NA handling
 na_indices <- final_results$index[is.na(final_results$frame)]
@@ -762,10 +758,153 @@ for (i in na_batches) {
   # Update final_results in place
   final_results$frame[final_results$index %in% indices] <- frames[1:length(indices)]
   
-  # Optional: save checkpoint after each retry
-  saveRDS(final_results, "checkpoint_results_retry.rds")
 }
+
+```
+
+
+
+```{r}
+
+write_rds(immigration, "immigration.rds")
+
+# Calculate precision & recall
+immigration$gemini_label <- gsub("/", ".", immigration$gemini_label)
+
+immigration <- immigration %>%
+  arrange(episode) %>% 
+  distinct(episode, .keep_all = TRUE) 
+
+hc_complete <- hc_complete %>% 
+  left_join(immigration %>% 
+            select(gemini_label, episode), 
+            join_by(matched_episode == episode))
+
+
+true_labels <- factor(hc_complete$coder1_label)
+predicted_labels <- factor(hc_complete$gemini_label, levels = levels(true_labels))
+
+conf_matrix <- confusionMatrix(predicted_labels, true_labels)
+
+conf_matrix
+# Print precision and recall table
+print(conf_matrix$byClass[, c("Precision", "Recall")])
 
 
 
 ```
+# VIS
+```{r}
+
+immigration$gemini_label <- gsub("Other", "Procedural", immigration$gemini_label)
+
+topic_time <- immigration %>% 
+  select(episode_date, gemini_label, episode) %>%  
+  mutate(
+    period = lubridate::floor_date(episode_date, "6 months")
+  ) %>%  
+  group_by(period) %>% 
+  count(gemini_label) %>%  
+  mutate( 
+    shares = n/sum(n)
+    )
+
+
+# check 
+topic_time %>%  
+  group_by(period) %>% 
+  summarise(sum(shares))
+
+
+ggplot(topic_time, aes(x = period, y = shares, color = as.factor(gemini_label))) + 
+  geom_line(size = 0.7) +
+  labs(title = "Immigration topic trends over time",
+       x = "Month", y = "Average topic proportion",
+       color = "Topic") +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+
+immigration %>%
+  count(program, name = "immig_episodes") %>%
+  left_join(episodes %>% count(program, name = "total_episodes"), by = "program") %>%
+  mutate(immig_share = immig_episodes / total_episodes) %>%
+  ggplot(aes(x = reorder(program, immig_share), y = immig_share)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "Immigration coverage as % of all episodes",
+       x = "Program", y = "Percent immigration-related") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  coord_flip() +
+  theme_minimal()
+
+   # all programs have at least 10 episodes over the study period
+```
+
+
+
+```{r}
+immigration$sentiment <- get_sentiment(immigration$snippet, method = "afinn")
+
+immigration %>%
+  group_by(gemini_label) %>%
+  summarise(avg_sentiment = mean(sentiment, na.rm = TRUE)) %>%
+  ggplot(aes(x = reorder(gemini_label, avg_sentiment), y = avg_sentiment, fill = gemini_label)) +
+  geom_col(show.legend = FALSE) +
+  labs(title = "Average sentiment by topic",
+       x = "Topic", y = "Avg sentiment score") +
+  coord_flip() +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+
+top_hosts <- immigration %>%
+  count(host_name, sort = TRUE) %>%
+  slice_head(n = 5) %>%
+  pull(host_name)
+
+top_host_data <- immigration %>%
+  filter(host_name %in% top_hosts)
+
+
+top_host_data %>%
+  group_by(host_name, gemini_label) %>%
+  summarise(avg_sentiment = mean(sentiment, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = gemini_label, y = avg_sentiment, fill = host_name)) +
+  geom_col(position = "dodge") +
+  labs(title = "Average Sentiment by Topic and Host",
+       x = "Topic", y = "Average Sentiment",
+       fill = "Host") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+
+```
+
+
+```{r}
+
+top_host_data %>%
+  count(host_name, gemini_label) %>%
+  group_by(host_name) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = host_name, y = prop, fill = gemini_label)) +
+  geom_col(position = "fill") +
+  labs(title = "Topic Distribution by Top 5 Hosts",
+       x = "Host", y = "Proportion of Episodes",
+       fill = "Topic") +
+  theme_minimal()
+
+
+
+```
+
+
+
