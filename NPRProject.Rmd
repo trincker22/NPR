@@ -7,7 +7,6 @@ date: "2025-05-01"
 ```{r, results = 'hide', message = FALSE, warning = FALSE}
 
 
-
 library(tidyverse)
 library(readr)
 library(jsonlite)
@@ -29,6 +28,7 @@ library(randomForest)
 library(glmnet)
 
 
+
 # pull files 
 csvfiles <- list.files(path = here("archive"), pattern = "\\.csv$", full.names = TRUE)
 jsonfiles <- list.files(path = here("archive"), pattern = "\\.json$", full.names = TRUE)
@@ -40,7 +40,6 @@ names(jsonfiles) <- make.names(tools::file_path_sans_ext(basename(jsonfiles)))
 walk(names(csvfiles), ~ assign(.x, read_csv(csvfiles[[.x]]), envir = .GlobalEnv))
 walk(names(jsonfiles), ~ assign(.x, fromJSON(jsonfiles[[.x]], flatten = TRUE), envir = .GlobalEnv))
 
-
 ```
 
 # Cleaning
@@ -48,7 +47,7 @@ walk(names(jsonfiles), ~ assign(.x, fromJSON(jsonfiles[[.x]], flatten = TRUE), e
 ```{r clean, results = "hide"}
 
 
-# Collapse to 1 observation per episode (full transcript and guest-only)
+# Collapse to 1 observation per episode 
 ep_utterances <- utterances.2sp %>%
   group_by(episode) %>%
   summarise(full_text = paste(utterance, collapse = " "), .groups = "drop")
@@ -66,7 +65,7 @@ host_episode_df <- map_dfr(host.map, ~ tibble(
   group_by(episode) %>%
   summarise(host_name = paste(unique(host_name), collapse = ", "), .groups = "drop")
 
-# Define safe left_join function to avoid overwriting existing columns
+
 safe_join <- function(df, join_df, by_col, new_col) {
   if (!(new_col %in% colnames(df))) {
     df <- df %>% left_join(join_df, by = by_col)
@@ -76,19 +75,18 @@ safe_join <- function(df, join_df, by_col, new_col) {
   return(df)
 }
 
-# Loop through both datasets to attach host metadata and enrich features
+# Loop through both datasets to attach host metadata
 for (df_name in c("ep_utterances", "ep_utterancesG")) {
   df <- get(df_name)
 
   df <- safe_join(df, host_episode_df, "episode", "host_name")
   df <- safe_join(df, episodes, join_by(episode == id), "title")
 
-  # Convert program to factor (if present)
+  # Convert program to factor
   if ("program" %in% colnames(df)) {
     df$program <- as.factor(df$program)
   }
 
-  # Parse episode_date and create derived date columns (if present)
   if ("episode_date" %in% colnames(df)) {
     df <- df %>%
       mutate(
@@ -122,50 +120,50 @@ toks <- tokens(ep_uttercorp, remove_punct = TRUE, remove_numbers = TRUE) %>%
 dfm <- dfm(toks)
 
 
+
 ```
 
 ```{r immigration subset,  results = 'hide'}
 
-# Define stemmed immigration patterns (or load dynamically)
+
 immigration_stems <- c("immigr", "migrat", "migrant", "refuge", "asylum",
                        "deport", "citizenship", "visa", "undocu")
 
-# Identify matching documents based on keyword hits
+
 doc_index_new <- rowSums(dfm_select(dfm, pattern = immigration_stems)) > 0
 
-# Safely extract the corresponding episode IDs from the DFM
+
 matching_episodes <- docvars(dfm, "episode")[doc_index_new]
 
-# Now subset from the original episode data by ID (not position)
 ep_immigration <- ep_utterances %>% filter(episode %in% matching_episodes)
 
 
 ```
-
+# Snippet Build
 ```{r snippet create,  results = 'hide'}
 
+# pulls one snippet per episode by keyword, merges text if 2 keywords have overlapping windows, selects snippet randomly if there are multiple non-overlapping keyword windows
 
-# Define keyword pattern 
 pattern <- paste0(immigration_stems, collapse = "|")
 
-# Function to extract one snippet per episode
+
 get_one_snippet <- function(text, pattern, window = 50) {
   words <- unlist(tokenizers::tokenize_words(text, lowercase = TRUE))
   matches <- which(stringr::str_detect(words, pattern))
 
   if (length(matches) == 0) return(NA_character_)
 
-  # Build windows around each match
+
   windows <- lapply(matches, function(i) c(max(1, i - window), min(length(words), i + window)))
 
-  # Merge overlapping windows
+
   windows <- windows[order(sapply(windows, `[[`, 1))]
   merged <- list()
   current <- windows[[1]]
 
   for (w in windows[-1]) {
     if (w[1] <= current[2]) {
-      current[2] <- max(current[2], w[2])  # extend current window
+      current[2] <- max(current[2], w[2])  
     } else {
       merged <- append(merged, list(current))
       current <- w
@@ -173,7 +171,7 @@ get_one_snippet <- function(text, pattern, window = 50) {
   }
   merged <- append(merged, list(current))
 
-  # Choose one merged snippet at random
+
   chosen <- merged[[sample(length(merged), 1)]]
   snippet <- paste(words[chosen[1]:chosen[2]], collapse = " ")
   return(snippet)
@@ -188,7 +186,7 @@ snippets_df <- data.frame(
   stringsAsFactors = FALSE
 )
 
-# Join snippets back to metadata
+
 immigration <- left_join(snippets_df, ep_immigration, join_by(episode))
 
 
@@ -200,18 +198,16 @@ immigration <- left_join(snippets_df, ep_immigration, join_by(episode))
 
 invisible(hc_complete <- read_csv("hc_complete.csv", show_col_types = FALSE))
 
-
 all_categories <- c("Security.Threat", "Economic", "Humanitarian.Moral", "Other")
 
 
 cols_1 <- paste0(all_categories, "1")
 cols_2 <- paste0(all_categories, "2")
 
-# ensure one-hot columns are numeric
+
 hc_complete[cols_1] <- lapply(hc_complete[cols_1], as.numeric)
 hc_complete[cols_2] <- lapply(hc_complete[cols_2], as.numeric)
 
-#function to extract label from one-hot columns
 get_label <- function(row, suffix) {
   selected <- which(row[paste0(all_categories, suffix)] == 1)
   if (length(selected) == 1) {
@@ -267,13 +263,9 @@ if (!"snippet" %in% names(hc_complete)) {
     )
 }
 
-
-# LOOCV
-
 set.seed(123)
 n <- nrow(hc_complete)
 
-# Prepare full corpus and tokens once
 full_corp <- corpus(hc_complete, text_field = "snippet")
 full_toks <- tokens(full_corp, remove_punct = TRUE, remove_numbers = TRUE) %>%
   tokens_tolower() %>%
@@ -284,55 +276,54 @@ full_dfm <- dfm(full_toks) %>%
   dfm_trim(min_termfreq = 5) %>%
   dfm_weight(scheme = "prop")
 
-
-# True labels and matched docnames
 true_labels <- factor(hc_complete$coder1_label)
-doc_ids <- hc_complete$matched_episode
 
-# Store predictions
+precision_list <- list()
+recall_list <- list()
+accuracy_vec <- numeric(n)
 all_predictions <- character(n)
 
 for (i in 1:n) {
-  # Split LOOCV train/test
   train_dfm <- full_dfm[-i, ]
   test_dfm <- full_dfm[i, , drop = FALSE]
-  
   train_labels <- true_labels[-i]
-  
-  # Match features
+  test_label <- true_labels[i]
   test_dfm <- dfm_match(test_dfm, featnames(train_dfm))
-  
-  # Train Naive Bayes
   nb_model <- textmodel_nb(train_dfm, y = train_labels)
-
-  # Predict
   pred <- predict(nb_model, newdata = test_dfm)
   all_predictions[i] <- as.character(unname(pred))
+  pred_factor <- factor(pred, levels = levels(true_labels))
+  test_factor <- factor(test_label, levels = levels(true_labels))
+  conf <- confusionMatrix(pred_factor, test_factor)
+  precision_list[[i]] <- conf$byClass[, "Precision"]
+  recall_list[[i]] <- conf$byClass[, "Recall"]
+  accuracy_vec[i] <- conf$overall["Accuracy"]
 }
 
-# Add predictions back to data
-hc_complete$predicted <- factor(all_predictions, levels = levels(true_labels))
+precision_mat <- do.call(rbind, precision_list)
+recall_mat <- do.call(rbind, recall_list)
+avg_precision <- colMeans(precision_mat, na.rm = TRUE)
+avg_recall <- colMeans(recall_mat, na.rm = TRUE)
+avg_accuracy <- mean(accuracy_vec, na.rm = TRUE)
 
-# Confusion matrix
-conf_matrix <- confusionMatrix(hc_complete$predicted, true_labels)
-
-conf_matrix
-
-# Output precision and recall per class
-print(conf_matrix$byClass[, c("Precision", "Recall")])
-
-
-table(true_labels)
-table(hc_complete$predicted)
-
+cat("\nLOOCV Average Metrics\n")
+cat("Average Accuracy:", round(avg_accuracy, 4), "\n\n")
+cat("Average Precision per class:\n")
+print(round(avg_precision, 4))
+cat("\nAverage Recall per class:\n")
+print(round(avg_recall, 4))
 
 ```
+
 
 ```{r}
 
 
-# === Load GloVe embeddings ===
-glove_file <- "glove.6B.100d.txt"
+set.seed(124)
+n <- nrow(hc_complete)
+
+
+glove_file <- "glove.twitter.27B.100d.txt"
 glove_raw <- fread(
   glove_file,
   header = FALSE,
@@ -341,7 +332,7 @@ glove_raw <- fread(
 )
 setnames(glove_raw, c("word", paste0("V", 1:100)))
 
-# === Prepare document embeddings ===
+
 tokenized <- strsplit(tolower(hc_complete$snippet), "\\s+")
 
 doc_embeddings <- t(sapply(tokenized, function(words) {
@@ -353,68 +344,189 @@ doc_embeddings <- t(sapply(tokenized, function(words) {
   }
 }))
 
-# === Reduce dimensionality ===
-pca <- prcomp(doc_embeddings, center = TRUE, scale. = TRUE)
-reduced_embeddings <- pca$x[, 1:30]  # Using top 30 PCs
-
-# === Set up labels ===
 true_labels <- factor(hc_complete$coder1_label)
-n_total <- nrow(hc_complete)
 
-# === Train/Test Split (80 docs) ===
-set.seed(123)
-if (n_total <= 80) {
-  train_idx <- sample(seq_len(n_total), floor(0.8 * n_total))
-} else {
-  train_idx <- sample(seq_len(n_total), 80)
+precision_list <- list()
+recall_list <- list()
+accuracy_vec <- numeric(n)
+
+for (i in 1:n) {
+  train_x <- doc_embeddings[-i, ]
+  test_x <- matrix(doc_embeddings[i, ], nrow = 1)
+  
+  train_y <- true_labels[-i]
+  test_y <- true_labels[i]
+  
+  nb_model <- naiveBayes(x = train_x, y = train_y)
+  
+  pred <- predict(nb_model, newdata = test_x)
+  
+  pred_factor <- factor(pred, levels = levels(true_labels))
+  test_factor <- factor(test_y, levels = levels(true_labels))
+  
+  conf <- confusionMatrix(pred_factor, test_factor)
+  
+  precision_list[[i]] <- conf$byClass[, "Precision"]
+  recall_list[[i]] <- conf$byClass[, "Recall"]
+  accuracy_vec[i] <- conf$overall["Accuracy"]
 }
-test_idx <- setdiff(seq_len(n_total), train_idx)
 
-train_x <- reduced_embeddings[train_idx, ]
-train_y <- true_labels[train_idx]
-test_x <- reduced_embeddings[test_idx, ]
-test_y <- true_labels[test_idx]
+precision_mat <- do.call(rbind, precision_list)
+recall_mat <- do.call(rbind, recall_list)
+avg_precision <- colMeans(precision_mat, na.rm = TRUE)
+avg_recall <- colMeans(recall_mat, na.rm = TRUE)
+avg_accuracy <- mean(accuracy_vec, na.rm = TRUE)
 
-# === Calculate class weights ===
-class_counts <- table(train_y)
-inv_weights <- sum(class_counts) / (length(class_counts) * class_counts)
-inv_weights <- as.list(inv_weights)
-names(inv_weights) <- names(class_counts)
+cat("\nLOOCV Average Metrics (Naive Bayes, raw Twitter GloVe)\n")
+cat("Average Accuracy:", round(avg_accuracy, 4), "\n\n")
+cat("Average Precision per class:\n")
+print(round(avg_precision, 4))
+cat("\nAverage Recall per class:\n")
+print(round(avg_recall, 4))
 
-cat("Class weights:\n")
-print(inv_weights)
 
-# === Train weighted SVM ===
-weighted_svm <- svm(
-  x = train_x,
-  y = train_y,
-  kernel = "linear",
-  class.weights = inv_weights
+
+```
+
+# Support Vector Machine 
+With 100D Twitter Embeddings, class weighting. 
+
+```{r}
+
+set.seed(124)
+n <- nrow(hc_complete)
+
+
+true_labels <- factor(hc_complete$coder1_label)
+
+precision_list <- list()
+recall_list <- list()
+accuracy_vec <- numeric(n)
+
+for (i in 1:n) {
+  train_x <- doc_embeddings[-i, ]
+  test_x <- matrix(doc_embeddings[i, ], nrow = 1)
+  
+  train_y <- true_labels[-i]
+  test_y <- true_labels[i]
+  
+  class_counts <- table(train_y)
+  inv_weights <- sum(class_counts) / (length(class_counts) * class_counts)
+  inv_weights <- as.list(inv_weights)
+  names(inv_weights) <- names(class_counts)
+  
+  svm_model <- svm(
+    x = train_x,
+    y = train_y,
+    kernel = "linear",
+    class.weights = inv_weights
+  )
+  
+  pred <- predict(svm_model, test_x)
+  
+  pred_factor <- factor(pred, levels = levels(true_labels))
+  test_factor <- factor(test_y, levels = levels(true_labels))
+  
+  conf <- confusionMatrix(pred_factor, test_factor)
+  
+  precision_list[[i]] <- conf$byClass[, "Precision"]
+  recall_list[[i]] <- conf$byClass[, "Recall"]
+  accuracy_vec[i] <- conf$overall["Accuracy"]
+}
+
+precision_mat <- do.call(rbind, precision_list)
+recall_mat <- do.call(rbind, recall_list)
+avg_precision <- colMeans(precision_mat, na.rm = TRUE)
+avg_recall <- colMeans(recall_mat, na.rm = TRUE)
+avg_accuracy <- mean(accuracy_vec, na.rm = TRUE)
+
+cat("\nLOOCV Average Metrics (Weighted SVM, raw Twitter GloVe)\n")
+cat("Average Accuracy:", round(avg_accuracy, 4), "\n\n")
+cat("Average Precision per class:\n")
+print(round(avg_precision, 4))
+cat("\nAverage Recall per class:\n")
+print(round(avg_recall, 4))
+
+
+
+```
+PCA to reduce dimensionality. 
+```{R}
+set.seed(124)
+n <- nrow(hc_complete)
+
+pca <- prcomp(doc_embeddings, center = TRUE, scale. = TRUE)
+reduced_embeddings <- pca$x[, 1:30]
+
+
+# Looking at the PCA. it actually is very poor 
+pca_df <- data.frame(
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  label = hc_complete$coder1_label
 )
 
-# === Predict and evaluate ===
-weighted_pred <- predict(weighted_svm, test_x)
-weighted_conf <- confusionMatrix(weighted_pred, test_y)
 
-cat("\n=== Weighted SVM Performance ===\n")
-print(weighted_conf)
-print(weighted_conf$byClass[, c("Precision", "Recall")])
+ggplot(pca_df, aes(x = PC1, y = PC2, color = label)) +
+  geom_point(size = 2, alpha = 0.7) +
+  labs(title = "PCA Plot of Twitter GloVe Embeddings",
+       x = "Principal Component 1",
+       y = "Principal Component 2",
+       color = "Class Label") +
+  theme_minimal()
 
-# === Train unweighted SVM ===
-unweighted_svm <- svm(
-  x = train_x,
-  y = train_y,
-  kernel = "linear"
-)
 
-# === Predict and evaluate ===
-unweighted_pred <- predict(unweighted_svm, test_x)
-unweighted_conf <- confusionMatrix(unweighted_pred, test_y)
+######################
 
-cat("\n=== Unweighted SVM Performance ===\n")
-print(unweighted_conf)
-print(unweighted_conf$byClass[, c("Precision", "Recall")])
+true_labels <- factor(hc_complete$coder1_label)
 
+precision_list <- list()
+recall_list <- list()
+accuracy_vec <- numeric(n)
+
+for (i in 1:n) {
+  train_x <- reduced_embeddings[-i, ]
+  test_x <- matrix(reduced_embeddings[i, ], nrow = 1)
+  
+  train_y <- true_labels[-i]
+  test_y <- true_labels[i]
+  
+  class_counts <- table(train_y)
+  inv_weights <- sum(class_counts) / (length(class_counts) * class_counts)
+  inv_weights <- as.list(inv_weights)
+  names(inv_weights) <- names(class_counts)
+  
+  svm_model <- svm(
+    x = train_x,
+    y = train_y,
+    kernel = "linear",
+    class.weights = inv_weights
+  )
+  
+  pred <- predict(svm_model, test_x)
+  
+  pred_factor <- factor(pred, levels = levels(true_labels))
+  test_factor <- factor(test_y, levels = levels(true_labels))
+  
+  conf <- confusionMatrix(pred_factor, test_factor)
+  
+  precision_list[[i]] <- conf$byClass[, "Precision"]
+  recall_list[[i]] <- conf$byClass[, "Recall"]
+  accuracy_vec[i] <- conf$overall["Accuracy"]
+}
+
+precision_mat <- do.call(rbind, precision_list)
+recall_mat <- do.call(rbind, recall_list)
+avg_precision <- colMeans(precision_mat, na.rm = TRUE)
+avg_recall <- colMeans(recall_mat, na.rm = TRUE)
+avg_accuracy <- mean(accuracy_vec, na.rm = TRUE)
+
+cat("\n=== LOOCV Average Metrics (Weighted SVM, No PCA)\n")
+cat("Average Accuracy:", round(avg_accuracy, 4), "\n\n")
+cat("Average Precision per class:\n")
+print(round(avg_precision, 4))
+cat("\nAverage Recall per class:\n")
+print(round(avg_recall, 4))
 
 ```
 
@@ -422,186 +534,125 @@ print(unweighted_conf$byClass[, c("Precision", "Recall")])
 
 ```{r}
 
-
-# === Set up input ===
-# (Already reduced embeddings from PCA)
-X <- reduced_embeddings
-Y <- true_labels
-
-# Encode as numeric matrix
-Y_numeric <- as.numeric(Y)  # glmnet needs numeric class labels
-
-# === Train/Test Split (same logic) ===
 set.seed(123)
-if (nrow(X) <= 80) {
-  train_idx <- sample(seq_len(nrow(X)), floor(0.8 * nrow(X)))
-} else {
-  train_idx <- sample(seq_len(nrow(X)), 80)
-}
-test_idx <- setdiff(seq_len(nrow(X)), train_idx)
-
-train_x <- X[train_idx, ]
-train_y <- Y[train_idx]
-test_x <- X[test_idx, ]
-test_y <- Y[test_idx]
-
-# === Fit LASSO Multinomial Logistic Regression ===
-lasso_model <- cv.glmnet(
-  x = train_x,
-  y = train_y,
-  family = "multinomial",
-  alpha = 1  # LASSO penalty
-)
-
-# === Predict ===
-predictions <- predict(lasso_model, newx = test_x, s = "lambda.min", type = "class")
-predictions <- factor(predictions, levels = levels(Y))
-
-# === Evaluate ===
-conf_matrix <- confusionMatrix(predictions, test_y)
-print(conf_matrix)
-print(conf_matrix$byClass[, c("Precision", "Recall")])
-
-
-
-
-```
-
-# Random Forest
-
-```{r}
-
-
-hc_complete <- hc_complete %>% 
-  left_join(immigration %>%  
-              select(episode, lda_based_frame), 
-            join_by(matched_episode== episode))
-
-
-
-# Combine data
-train_data <- data.frame(train_x)
-train_data$label <- train_y
-
-# Upsample minority classes
-set.seed(123)
-balanced_data <- upSample(x = train_x, y = train_y)
-
-# Train Random Forest
-rf_model <- randomForest(x = balanced_data[, -ncol(balanced_data)], y = balanced_data$Class, ntree = 500)
-
-# Predict on test set
-predictions <- predict(rf_model, test_x)
-
-# Evaluate
-conf_matrix <- confusionMatrix(predictions, test_y)
-print(conf_matrix)
-print(conf_matrix$byClass[, c("Precision", "Recall")])
-
-
-```
-
-# LLM
-
-```{r gemini, eval = F }
-library(ellmer)
-
-
-chat <- ellmer::chat_google_gemini()
-
-classify_immigration_frame <- function(text) {
-  Sys.sleep(15)  # requests per minute isnt an issue, BUT this prompt is large and requires a lot of tokens, so it will hit the token per minute limit even though there are unlimited tokens overall. 15 is most reliable for me but ofc extremely slow
-  
-  prompt <- paste(
-    "Classify the following immigration-related text into one of four frames:\n\n",
-    
-    "Security/Threat Frame\n",
-    "Articles that primarily frame immigration as a threat to national security, public safety, or the legal order. Even if a story seems sympathetic, if it evokes associations with security or crime (e.g., fleeing violence from cartels), classify as Security/Threat.\n",
-    "Focus on illegal entry, smuggling, or border crossings\n",
-    "Coverage of immigration enforcement (e.g., ICE raids, deportations)\n",
-    "Crime or terrorism tied to immigrants or asylum seekers\n",
-    "National security concerns or protective measures\n",
-    "Political rhetoric focused on law and order\n",
-    "Keywords: illegal, deportation, border wall, crime, ICE, security, terrorism, smuggling, cartels, public safety\n\n",
-    
-    "Economic Frame\n",
-    "Articles that focus on the financial or labor market implications of immigration.\n",
-    "Immigrants as workers in specific industries\n",
-    "Central focus on appropriations/funding of immigration issues, even if the funding debate leads speakers to make arguments that fall into one of the other categories.\n",
-    "Impact on wages, employment, housing, or taxes\n",
-    "Economic contributions (e.g., entrepreneurship, GDP, remittances)\n",
-    "Business demand for migrant labor or work visas\n",
-    "Fiscal burden or benefit arguments\n",
-    "Keywords: jobs, labor, taxes, contribution, costs, economic growth, shortages, employment, undocumented workers\n\n",
-    
-    "Humanitarian/Moral Frame\n",
-    "Articles that highlight the lived experiences, rights, or moral standing of immigrants and refugees.\n",
-    "Stories of asylum seekers, refugees, or displaced families\n",
-    "Discussion of living conditions is the strongest predictor of this frame. Next;\n",
-    "Focus on human suffering, trauma, or discrimination\n",
-    "Coverage of family separation, detainment, or access to services\n",
-    "Discussions of inclusion, dignity, or moral responsibility\n",
-    "Civil society efforts to aid or defend migrant\n",
-    "Keywords: asylum, refugee, family, rights, trauma, detention, inclusion, discrimination, DACA, compassion, migrant children\n\n",
-    
-    "Other\n",
-    "Mention of immigration is offhand, not the major focus of the piece—for example, coverage of a session of congress where immigration is a topic of focus, but immigration is merely tangential. Or, discussion of presidential approval rates, and immigration is mentioned as a topic influencing the results, but is not the focus of the piece. Finally, snippets generally not relevant to other categories should fall here.\n",
-    "Broad overview of political position/environment that only tangentially mentions immigration.\n\n",
-    
-    "Now classify this:\n",
-    "Text: ", text, "\n",
-    "Respond with ONLY ONE of: Security/Threat, Economic, Humanitarian/Moral, Other"
-  )
-  
-  result <- tryCatch({
-    response <- chat$chat(prompt)
-    response_clean <- tolower(response)
-    
-    if (grepl("security", response_clean)) {
-      "Security/Threat"
-    } else if (grepl("economic", response_clean)) {
-      "Economic"
-    } else if (grepl("humanitarian|moral", response_clean)) {
-      "Humanitarian/Moral"
-    } else if (grepl("other", response_clean)) {
-      "Other"
-    } else {
-      "Unclear"
-    }
-  }, error = function(e) {
-    message("API error: ", e$message)
-    return(NA)
-  })
-  
-  return(result)
-}
-
-
-hc_complete$gemini_label <- sapply(immigration$snippet, classify_immigration_frame)
-
-
-```
-
-```{r gemini results, eval = F}
-
-# Calculate precision & recall
-hc_complete$gemini_label <- gsub("/", ".", hc_complete$gemini_label)
+n <- nrow(hc_complete)
 
 true_labels <- factor(hc_complete$coder1_label)
-predicted_labels <- factor(hc_complete$gemini_label, levels = levels(true_labels))
 
-conf_matrix <- confusionMatrix(predicted_labels, true_labels)
+# Find best lambda on full data (unweighted)
+full_lasso_cv <- cv.glmnet(
+  x = doc_embeddings,
+  y = as.numeric(true_labels),
+  family = "multinomial",
+  alpha = 1
+)
 
-conf_matrix
-# Print precision and recall table
-print(conf_matrix$byClass[, c("Precision", "Recall")])
+best_lambda <- full_lasso_cv$lambda.min
+cat("Best lambda from full CV:", best_lambda, "\n")
 
+all_predictions <- character(n)
+
+for (i in 1:n) {
+  train_x <- doc_embeddings[-i, ]
+  test_x <- matrix(doc_embeddings[i, ], nrow = 1)
+  
+  train_y <- true_labels[-i]
+  
+  # inverse weights for weighted model 
+  class_counts <- table(train_y)
+  inv_weights <- 1 / class_counts[train_y]
+  sample_weights <- as.numeric(inv_weights)
+  
+  lasso_model <- glmnet(
+    x = train_x,
+    y = as.numeric(train_y),
+    family = "multinomial",
+    alpha = 1,
+    lambda = best_lambda,
+    weights = sample_weights
+  )
+  
+  pred <- predict(lasso_model, newx = test_x, type = "class")
+  pred_class <- levels(true_labels)[as.numeric(pred)]
+  all_predictions[i] <- pred_class
+}
+
+predicted_labels <- factor(all_predictions, levels = levels(true_labels))
+conf <- confusionMatrix(predicted_labels, true_labels)
+
+cat("\n=== LOOCV Metrics (Weighted LASSO) ===\n")
+cat("Overall Accuracy:", round(conf$overall["Accuracy"], 4), "\n\n")
+cat("Precision and Recall per class:\n")
+print(round(conf$byClass[, c("Precision", "Recall")], 4))
+
+
+```
+
+# Random Forest (with raw embeddings)
+
+```{r}
+
+set.seed(124)
+n <- nrow(hc_complete)
+
+
+true_labels <- factor(hc_complete$coder1_label)
+
+precision_list <- list()
+recall_list <- list()
+accuracy_vec <- numeric(n)
+
+for (i in 1:n) {
+  train_x <- doc_embeddings[-i, ]
+  test_x <- matrix(doc_embeddings[i, ], nrow = 1)
+  
+  train_y <- true_labels[-i]
+  test_y <- true_labels[i]
+  
+  # Upsample minority classes inside each fold
+  train_data <- data.frame(train_x)
+  train_data$label <- train_y
+  
+  set.seed(123)
+  balanced_data <- upSample(x = train_data[, -ncol(train_data)], y = train_data$label)
+  
+  rf_model <- randomForest(
+    x = balanced_data[, -ncol(balanced_data)],
+    y = balanced_data$Class,
+    ntree = 500
+  )
+  
+  pred <- predict(rf_model, test_x)
+  
+  pred_factor <- factor(pred, levels = levels(true_labels))
+  test_factor <- factor(test_y, levels = levels(true_labels))
+  
+  conf <- confusionMatrix(pred_factor, test_factor)
+  
+  precision_list[[i]] <- conf$byClass[, "Precision"]
+  recall_list[[i]] <- conf$byClass[, "Recall"]
+  accuracy_vec[i] <- conf$overall["Accuracy"]
+}
+
+precision_mat <- do.call(rbind, precision_list)
+recall_mat <- do.call(rbind, recall_list)
+avg_precision <- colMeans(precision_mat, na.rm = TRUE)
+avg_recall <- colMeans(recall_mat, na.rm = TRUE)
+avg_accuracy <- mean(accuracy_vec, na.rm = TRUE)
+
+cat("\n=== LOOCV Average Metrics (Random Forest, raw Twitter GloVe) ===\n")
+cat("Average Accuracy:", round(avg_accuracy, 4), "\n\n")
+cat("Average Precision per class:\n")
+print(round(avg_precision, 4))
+cat("\nAverage Recall per class:\n")
+print(round(avg_recall, 4))
 
 
 ```
 
 
-```{r}
+
+```{r, eval = F}
 
 #Batched prompt to classify entire immigration df 
 
@@ -687,7 +738,7 @@ texts <- immigration$snippet
 # Split into batches of 3
 batches <- split(texts, ceiling(seq_along(texts) / 3))
 
-# Load existing results if they exist
+# Load existing results
 if (exists("final_results")) {
   processed_indices <- final_results$index
   start_batch <- ceiling(max(processed_indices) / 3) + 1
@@ -726,7 +777,7 @@ for (i in start_batch:length(batches)) {
   }
 }
 
-final_results <- do.call(rbind, all_results)
+
 immigration$gemini_label <- final_results$frame
 
 summary(as.factor(final_results$frame))
@@ -740,6 +791,7 @@ cat("Number of NA entries:", length(na_indices), "\n")
 na_batches <- unique(ceiling(na_indices / 3))
 
 cat("Number of batches to re-run:", length(na_batches), "\n")
+
 
 
 for (i in na_batches) {
@@ -766,17 +818,11 @@ for (i in na_batches) {
 
 ```{r}
 
-write_rds(immigration, "immigration.rds")
+immigration <- readRDS("immigration.rds")
 
-# Calculate precision & recall
-immigration$gemini_label <- gsub("/", ".", immigration$gemini_label)
-
-immigration <- immigration %>%
-  arrange(episode) %>% 
-  distinct(episode, .keep_all = TRUE) 
 
 hc_complete <- hc_complete %>% 
-  left_join(immigration %>% 
+  inner_join(immigration %>% 
             select(gemini_label, episode), 
             join_by(matched_episode == episode))
 
@@ -787,7 +833,8 @@ predicted_labels <- factor(hc_complete$gemini_label, levels = levels(true_labels
 conf_matrix <- confusionMatrix(predicted_labels, true_labels)
 
 conf_matrix
-# Print precision and recall table
+
+# Eval
 print(conf_matrix$byClass[, c("Precision", "Recall")])
 
 
@@ -817,7 +864,7 @@ topic_time %>%
 
 
 ggplot(topic_time, aes(x = period, y = shares, color = as.factor(gemini_label))) + 
-  geom_line(size = 0.7) +
+  geom_line(size = 0.5, alpha = 0.8) +
   labs(title = "Immigration topic trends over time",
        x = "Month", y = "Average topic proportion",
        color = "Topic") +
@@ -858,6 +905,7 @@ immigration %>%
        x = "Topic", y = "Avg sentiment score") +
   coord_flip() +
   theme_minimal()
+
 
 
 ```
